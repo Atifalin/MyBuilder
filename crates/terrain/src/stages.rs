@@ -522,3 +522,475 @@ impl Stage for ExportStage {
         FileBundle::encode(&bundle)
     }
 }
+
+// ---------------------------------------------------------------------
+// S10: layers + per-chunk sliced stages + manifest stage.
+// Chunk artifact = 8-byte header (vertex_count u32, triangle_count u32,
+// LE) followed by the GLB file bytes.
+
+pub const CHUNK_HEADER: usize = 8;
+
+/// world.layers: the raster layer bundle (r16 x2, masks, layers.json,
+/// hillshade preview). Normal stage, deps height + masks.
+pub struct LayersStage {
+    pub code_version: u32,
+    pub grid: Grid,
+    pub project: ProjectFile,
+    pub world: WorldRecipe,
+    deps: Vec<String>,
+}
+
+impl LayersStage {
+    pub const ID: &'static str = "world.layers";
+    pub fn new(grid: Grid, project: ProjectFile, world: WorldRecipe, code_version: u32) -> Self {
+        LayersStage {
+            code_version,
+            grid,
+            project,
+            world,
+            deps: vec![HeightStage::ID.to_string(), MasksStage::ID.to_string()],
+        }
+    }
+}
+
+impl Stage for LayersStage {
+    fn id(&self) -> &str {
+        Self::ID
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn code_version(&self) -> u32 {
+        self.code_version
+    }
+    fn params(&self) -> Vec<u8> {
+        params(&serde_json::json!({
+            "cell_size_m": self.grid.cell,
+            "generator_version": self.project.generator_version,
+        }))
+    }
+    fn run(&self, inputs: &[&Artifact], _seed: u64) -> Artifact {
+        let (_nx, _nz, h_min, h_max, heights, _coast) = decode_height(&inputs[0].bytes);
+        let (_g, masks) = decode_masks(&inputs[1].bytes);
+        let hf = HeightField {
+            h: heights,
+            h_min,
+            h_max,
+        };
+        outputs::build_layers_bundle(&self.grid, &self.world, &hf, &masks).encode()
+    }
+}
+
+/// world.chunk.{cx}_{cz}: sliced stage, dep = world.height. Artifact is
+/// header + GLB. The slice is the chunk's node range + edge aprons +
+/// coast, so a height edit only re-runs the chunks whose slice changed.
+pub struct ChunkStage {
+    pub code_version: u32,
+    pub grid: Grid,
+    pub project: ProjectFile,
+    pub world: WorldRecipe,
+    pub cx: usize,
+    pub cz: usize,
+    stage_id: String,
+    deps: Vec<String>,
+}
+
+pub fn chunk_stage_id(cx: usize, cz: usize) -> String {
+    format!("world.chunk.{cx}_{cz}")
+}
+
+impl ChunkStage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        grid: Grid,
+        project: ProjectFile,
+        world: WorldRecipe,
+        cx: usize,
+        cz: usize,
+        code_version: u32,
+    ) -> Self {
+        ChunkStage {
+            code_version,
+            grid,
+            project,
+            world,
+            cx,
+            cz,
+            stage_id: chunk_stage_id(cx, cz),
+            deps: vec![HeightStage::ID.to_string()],
+        }
+    }
+}
+
+impl mb_pipeline::SlicedStage for ChunkStage {
+    fn id(&self) -> &str {
+        &self.stage_id
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn code_version(&self) -> u32 {
+        self.code_version
+    }
+    fn params(&self) -> Vec<u8> {
+        params(&serde_json::json!({
+            "cx": self.cx,
+            "cz": self.cz,
+            "chunk_size_m": self.world.chunk_size_m,
+            "cell_size_m": self.grid.cell,
+            "mesh_step_cells": self.world.export.mesh_step_cells,
+            "sea_level_m": self.world.sea_level_m,
+            "snow_line_m": self.world.profile.snow_line_m,
+            "generator_version": self.project.generator_version,
+            "seed": format!("{:016x}", self.project.seed),
+        }))
+    }
+    fn slice(&self, inputs: &[&Artifact]) -> Vec<u8> {
+        let (nx, nz, h_min, h_max, heights, coast) = decode_height(&inputs[0].bytes);
+        let hf = HeightField {
+            h: heights,
+            h_min,
+            h_max,
+        };
+        let _ = (nx, nz);
+        let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
+        crate::slice::encode_chunk_slice(&self.grid, &hf, &coast, cells_per_chunk, self.cx, self.cz)
+    }
+    fn run(&self, slice: &[u8], _seed: u64) -> Artifact {
+        let cs = crate::slice::decode_chunk_slice(slice);
+        let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
+        let step = self.world.export.mesh_step_cells as usize;
+        let (gi_hi, gj_hi) = (self.grid.nx - 1, self.grid.nz - 1);
+        let cell = self.grid.cell;
+        let h_at = |i: usize, j: usize| cs.h_at(i, j);
+        let normal_at =
+            |i: usize, j: usize| crate::mesh::node_normal(&h_at, i, j, gi_hi, gj_hi, cell);
+        let coast_at = |i: usize, j: usize| cs.coast_at(i, j);
+        let mesh = crate::mesh::chunk_mesh_view(
+            &self.grid,
+            h_at,
+            normal_at,
+            coast_at,
+            self.world.sea_level_m,
+            self.world.profile.snow_line_m,
+            cells_per_chunk,
+            step,
+            self.cx,
+            self.cz,
+        );
+        let id = mb_seed::EntityId::from_path(
+            self.project.seed,
+            &[
+                ("world", "main"),
+                ("chunk", &format!("{}_{}", self.cx, self.cz)),
+            ],
+        );
+        let glb = crate::glb::chunk_glb(
+            &mesh,
+            &format!("chunk_{}_{}", self.cx, self.cz),
+            &id.to_string(),
+            self.cx,
+            self.cz,
+        );
+        let mut out = Vec::with_capacity(CHUNK_HEADER + glb.len());
+        out.extend_from_slice(&(mesh.vertex_count as u32).to_le_bytes());
+        out.extend_from_slice(&(mesh.triangle_count as u32).to_le_bytes());
+        out.extend_from_slice(&glb);
+        Artifact::new(out)
+    }
+}
+
+/// world.region.{id}.chunk.{cx}_{cz}: sliced, deps height + distance.
+pub struct RegionChunkStage {
+    pub code_version: u32,
+    pub grid: Grid,
+    pub project: ProjectFile,
+    pub world: WorldRecipe,
+    pub region: mb_schema::DetailRegion,
+    pub cx: usize,
+    pub cz: usize,
+    stage_id: String,
+    deps: Vec<String>,
+}
+
+pub fn region_chunk_stage_id(region: &str, cx: usize, cz: usize) -> String {
+    format!("world.region.{region}.chunk.{cx}_{cz}")
+}
+
+impl RegionChunkStage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        grid: Grid,
+        project: ProjectFile,
+        world: WorldRecipe,
+        region: mb_schema::DetailRegion,
+        cx: usize,
+        cz: usize,
+        code_version: u32,
+    ) -> Self {
+        let stage_id = region_chunk_stage_id(&region.id, cx, cz);
+        RegionChunkStage {
+            code_version,
+            grid,
+            project,
+            world,
+            region,
+            cx,
+            cz,
+            stage_id,
+            deps: vec![HeightStage::ID.to_string(), DistanceStage::ID.to_string()],
+        }
+    }
+}
+
+impl mb_pipeline::SlicedStage for RegionChunkStage {
+    fn id(&self) -> &str {
+        &self.stage_id
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn code_version(&self) -> u32 {
+        self.code_version
+    }
+    fn params(&self) -> Vec<u8> {
+        // The region boundary rect is params, not data: w depends on it.
+        params(&serde_json::json!({
+            "cx": self.cx,
+            "cz": self.cz,
+            "region": self.region,
+            "terrain": self.world.terrain,
+            "profile": self.world.profile,
+            "cell_size_m": self.grid.cell,
+            "chunk_size_m": self.world.chunk_size_m,
+            "mesh_step_cells": self.world.export.mesh_step_cells,
+            "sea_level_m": self.world.sea_level_m,
+            "generator_version": self.project.generator_version,
+            "seed": format!("{:016x}", self.project.seed),
+        }))
+    }
+    fn slice(&self, inputs: &[&Artifact]) -> Vec<u8> {
+        let (_nx, _nz, h_min, h_max, heights, coast) = decode_height(&inputs[0].bytes);
+        let (_dnx, _dnz, _dcoast, mountain) = decode_distance(&inputs[1].bytes);
+        let hf = HeightField {
+            h: heights,
+            h_min,
+            h_max,
+        };
+        let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
+        let step = self.world.export.mesh_step_cells as usize;
+        crate::slice::encode_region_slice(
+            &self.grid,
+            &hf,
+            &coast,
+            &mountain,
+            cells_per_chunk,
+            step,
+            self.cx,
+            self.cz,
+        )
+    }
+    fn run(&self, slice: &[u8], _seed: u64) -> Artifact {
+        let rs = crate::slice::decode_region_slice(slice);
+        crate::region_slice::run_region_chunk(
+            &self.grid,
+            &rs,
+            &self.world,
+            &self.region,
+            self.project.seed,
+            self.cx,
+            self.cz,
+        )
+    }
+}
+
+/// world.manifest: builds manifest.json from the chunk artifacts and
+/// the layers.json inside the layers bundle (h_min/h_max live there).
+/// deps = world.layers + all chunk stages + all region chunk stages.
+pub struct ManifestStage {
+    pub code_version: u32,
+    pub grid: Grid,
+    pub project: ProjectFile,
+    pub world: WorldRecipe,
+    /// Stage ids in input order: [layers] + chunks (cz,cx) + region
+    /// chunks sorted by (region id, cz, cx).
+    deps: Vec<String>,
+}
+
+impl ManifestStage {
+    pub const ID: &'static str = "world.manifest";
+    pub fn new(grid: Grid, project: ProjectFile, world: WorldRecipe, code_version: u32) -> Self {
+        let cells_per_chunk = (world.chunk_size_m / grid.cell) as usize;
+        let ncx = (grid.nx - 1) / cells_per_chunk;
+        let ncz = (grid.nz - 1) / cells_per_chunk;
+        let mut deps = vec![LayersStage::ID.to_string()];
+        for cz in 0..ncz {
+            for cx in 0..ncx {
+                deps.push(chunk_stage_id(cx, cz));
+            }
+        }
+        // Region chunk ids sorted by (region id, cz, cx): first sort the
+        // regions by id, then emit their chunks in (cz, cx) order.
+        let mut regs: Vec<&mb_schema::DetailRegion> = world.detail_regions.iter().collect();
+        regs.sort_by(|a, b| a.id.cmp(&b.id));
+        for r in regs {
+            for cz in r.chunk_min[1]..=r.chunk_max[1] {
+                for cx in r.chunk_min[0]..=r.chunk_max[0] {
+                    deps.push(region_chunk_stage_id(&r.id, cx as usize, cz as usize));
+                }
+            }
+        }
+        ManifestStage {
+            code_version,
+            grid,
+            project,
+            world,
+            deps,
+        }
+    }
+}
+
+impl Stage for ManifestStage {
+    fn id(&self) -> &str {
+        Self::ID
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn code_version(&self) -> u32 {
+        self.code_version
+    }
+    fn params(&self) -> Vec<u8> {
+        params(&serde_json::json!({
+            "world": self.world,
+            "cell_size_m": self.grid.cell,
+            "generator_version": self.project.generator_version,
+            "seed": format!("{:016x}", self.project.seed),
+        }))
+    }
+    fn run(&self, inputs: &[&Artifact], _seed: u64) -> Artifact {
+        // input 0 = layers bundle -> parse layers.json for h_min/h_max
+        let lb = FileBundle::decode(&inputs[0].bytes);
+        let lj: serde_json::Value = serde_json::from_slice(
+            &lb.files
+                .iter()
+                .find(|(p, _)| p == "layers/layers.json")
+                .expect("layers.json")
+                .1,
+        )
+        .expect("layers.json parse");
+        let (h_min, h_max) = (lj["h_min"].as_f64().unwrap(), lj["h_max"].as_f64().unwrap());
+        let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
+        let ncx = (self.grid.nx - 1) / cells_per_chunk;
+        let ncz = (self.grid.nz - 1) / cells_per_chunk;
+        // superseded map
+        let mut superseded: std::collections::BTreeMap<(u32, u32), &str> =
+            std::collections::BTreeMap::new();
+        for r in &self.world.detail_regions {
+            for cx in r.chunk_min[0]..=r.chunk_max[0] {
+                for cz in r.chunk_min[1]..=r.chunk_max[1] {
+                    superseded.insert((cx, cz), r.id.as_str());
+                }
+            }
+        }
+        let mut k = 1usize; // inputs index after layers
+        let mut chunk_entries = Vec::new();
+        let (mut total_v, mut total_t) = (0usize, 0usize);
+        for cz in 0..ncz {
+            for cx in 0..ncx {
+                let a = &inputs[k];
+                k += 1;
+                let vc = u32::from_le_bytes(a.bytes[0..4].try_into().unwrap()) as usize;
+                let tc = u32::from_le_bytes(a.bytes[4..8].try_into().unwrap()) as usize;
+                let glb = &a.bytes[CHUNK_HEADER..];
+                let id = mb_seed::EntityId::from_path(
+                    self.project.seed,
+                    &[("world", "main"), ("chunk", &format!("{cx}_{cz}"))],
+                );
+                let ox = self.grid.x(cx * cells_per_chunk);
+                let oz = self.grid.z(cz * cells_per_chunk);
+                let mut entry = serde_json::json!({
+                    "id": id.to_string(),
+                    "cx": cx,
+                    "cz": cz,
+                    "file": format!("chunk_{cx}_{cz}.glb"),
+                    "origin": [ox, 0.0, oz],
+                    "vertex_count": vc,
+                    "triangle_count": tc,
+                    "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(glb)),
+                });
+                if let Some(rid) = superseded.get(&(cx as u32, cz as u32)) {
+                    entry["superseded_by"] = serde_json::json!(rid);
+                }
+                chunk_entries.push(entry);
+                total_v += vc;
+                total_t += tc;
+            }
+        }
+        // Regions sorted by id; their chunk inputs follow in the same
+        // (region id, cz, cx) order as deps.
+        let mut regs: Vec<&mb_schema::DetailRegion> = self.world.detail_regions.iter().collect();
+        regs.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut region_manifest = Vec::new();
+        for r in regs {
+            let mut entries = Vec::new();
+            for cz in r.chunk_min[1]..=r.chunk_max[1] {
+                for cx in r.chunk_min[0]..=r.chunk_max[0] {
+                    let a = &inputs[k];
+                    k += 1;
+                    let vc = u32::from_le_bytes(a.bytes[0..4].try_into().unwrap()) as usize;
+                    let tc = u32::from_le_bytes(a.bytes[4..8].try_into().unwrap()) as usize;
+                    let glb = &a.bytes[CHUNK_HEADER..];
+                    let (cx, cz) = (cx as usize, cz as usize);
+                    let key = format!("{cx}_{cz}");
+                    let id = mb_seed::EntityId::from_path(
+                        self.project.seed,
+                        &[("world", "main"), ("region", &r.id), ("chunk", &key)],
+                    );
+                    let ox = self.grid.x(cx * cells_per_chunk);
+                    let oz = self.grid.z(cz * cells_per_chunk);
+                    entries.push(serde_json::json!({
+                        "id": id.to_string(),
+                        "cx": cx,
+                        "cz": cz,
+                        "region": r.id,
+                        "file": format!("regions/{}/chunk_{cx}_{cz}.glb", r.id),
+                        "origin": [ox, 0.0, oz],
+                        "vertex_count": vc,
+                        "triangle_count": tc,
+                        "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(glb)),
+                    }));
+                    total_v += vc;
+                    total_t += tc;
+                }
+            }
+            region_manifest.push(serde_json::json!({
+                "id": r.id,
+                "chunk_min": r.chunk_min,
+                "chunk_max": r.chunk_max,
+                "cell_divisor": r.cell_divisor,
+                "mesh_step_cells": r.mesh_step_cells,
+                "extra_octaves": r.extra_octaves,
+                "blend_band_m": r.blend_band_m,
+                "chunks": entries,
+            }));
+        }
+        let hf = HeightField {
+            h: Vec::new(),
+            h_min,
+            h_max,
+        };
+        let bytes = outputs::manifest_json(
+            &self.project,
+            &self.world,
+            &self.grid,
+            &hf,
+            chunk_entries,
+            region_manifest,
+            ncx * ncz,
+            total_v,
+            total_t,
+        );
+        Artifact::new(bytes)
+    }
+}

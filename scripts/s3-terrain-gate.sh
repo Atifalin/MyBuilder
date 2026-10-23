@@ -8,7 +8,7 @@ cd "$ROOT"
 
 GODOT_BIN="${GODOT_BIN:-/Applications/Godot.app/Contents/MacOS/Godot}"
 BLENDER_BIN="${BLENDER_BIN:-/Applications/Blender.app/Contents/MacOS/Blender}"
-PROJ="$ROOT/target/s3/project"
+GATE_DIR="$ROOT/target/gates/s3"; rm -rf "$GATE_DIR"; PROJ="$GATE_DIR/project"
 DEMO="adapters/godot/demo"
 
 echo "== new project (seed 1) =="
@@ -31,7 +31,7 @@ echo "$GODOT_OUT" | grep -E 'S3|FAIL' || true
 echo "== Blender check =="
 BLENDER_OUT="$("$BLENDER_BIN" --background --factory-startup \
   --python adapters/blender/scripts/import_world.py -- \
-  --manifest "$MANIFEST" --blend "$ROOT/target/s3/world.blend" 2>&1 || true)"
+  --manifest "$MANIFEST" --blend "$ROOT/target/gates/s3/world.blend" 2>&1 || true)"
 echo "$BLENDER_OUT" | grep -E 'S3|FAIL|Error' | tail -5 || true
 
 ok=1

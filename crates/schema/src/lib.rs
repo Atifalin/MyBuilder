@@ -612,6 +612,27 @@ fn recipe_path_is_invalid(p: &str) -> bool {
         || p.split(['/', '\\']).any(|seg| seg == "..")
 }
 
+/// True when `rel` is a safe, project-confined relative path: non-empty,
+/// not absolute, no `..` component, no `:` (volume/drive marker), and no
+/// leading `\` or `/`. Same textual rules as `recipe_path_is_invalid`;
+/// used to validate file paths stored in manifests before deletion or
+/// writes, so a tampered manifest can never touch files outside the
+/// project dir.
+pub fn confined_rel_path_is_safe(rel: &str) -> bool {
+    if rel.is_empty() {
+        return false;
+    }
+    if rel.starts_with('/') || rel.starts_with('\\') || rel.contains(':') {
+        return false;
+    }
+    for seg in rel.split(['/', '\\']) {
+        if seg == ".." {
+            return false;
+        }
+    }
+    true
+}
+
 /// Validate a project + world recipe pair. Returns diagnostics in a
 /// stable order: file-level checks first, then per-shape checks.
 pub fn validate_project(project: &ProjectFile, world: &WorldRecipe) -> Vec<Diagnostic> {

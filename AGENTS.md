@@ -11,6 +11,22 @@
 The toolchain is pinned by `rust-toolchain.toml`; rustfmt and clippy are
 required components.
 
+## Build engine (S10)
+
+- `mybuilder build` uses a persistent cache at `<project>/cache/`:
+  `index.json` (stage id -> {key, artifact hash}), `blobs/<hash>.bin`,
+  `.lock` (exclusive advisory lock; OS releases it on process death).
+  Blobs are blake3-verified on load; corrupt/missing -> re-run.
+- Sliced stages (`world.chunk.*`, `world.region.*.chunk.*`) may ONLY read
+  their slice — the run fn receives the slice bytes, so the cache key
+  provably covers every input byte. Chunks use a 1-sample edge apron
+  (no corners: diagonals stay uncoupled); region chunks use a
+  mesh_step+1 coarse window.
+- `mybuilder build --clean --yes` wipes cache + files listed in the
+  previous manifest/layers.json (never anything else); refuses without
+  --yes.
+- Bumping `mb_seed::CURRENT_GENERATOR_VERSION` rekeys every stage.
+
 ## Generator versions
 
 `project.json` carries `generator_version` (default 1 when absent — never

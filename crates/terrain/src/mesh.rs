@@ -23,26 +23,43 @@ const GRASS: [f32; 3] = [0.35, 0.55, 0.28];
 const ROCK: [f32; 3] = [0.45, 0.43, 0.40];
 const SNOW: [f32; 3] = [0.92, 0.93, 0.95];
 
+/// Central-difference normal at one node. `h_at` supplies heights by
+/// (i, j); indices are clamped to [i_lo..=i_hi]x[j_lo..=j_hi] exactly the
+/// way the full-grid version clamps at world edges. This is THE normal
+/// formula shared by the full grid and sliced chunk stages — same
+/// arithmetic, so same bits.
+pub fn node_normal(
+    h_at: &dyn Fn(usize, usize) -> f64,
+    i: usize,
+    j: usize,
+    i_hi: usize,
+    j_hi: usize,
+    cell: f64,
+) -> [f32; 3] {
+    let d2 = 2.0 * cell;
+    let hl = h_at(i.saturating_sub(1), j);
+    let hr = h_at((i + 1).min(i_hi), j);
+    let hd = h_at(i, j.saturating_sub(1));
+    let hu = h_at(i, (j + 1).min(j_hi));
+    let ddx = (hr - hl) / d2;
+    let ddz = (hu - hd) / d2;
+    let (nx, ny, nz) = (-ddx, 1.0, -ddz);
+    let inv = 1.0 / (nx * nx + ny * ny + nz * nz).sqrt();
+    [(nx * inv) as f32, (ny * inv) as f32, (nz * inv) as f32]
+}
+
 /// Full-res per-node normals from central differences on the height
 /// field, edges clamped. Computed on the WHOLE grid so vertices on chunk
 /// borders get identical normals from both neighboring chunks.
 /// (sqrt is IEEE-754 correctly rounded — identical on every platform.)
 pub fn normals(grid: &Grid, hf: &HeightField) -> Vec<[f32; 3]> {
-    let mut out = vec![[0.0; 3]; grid.len()];
     let h = &hf.h;
-    let d2 = 2.0 * grid.cell;
+    let nx = grid.nx;
+    let h_at = |i: usize, j: usize| h[j * nx + i];
+    let mut out = vec![[0.0; 3]; grid.len()];
     for j in 0..grid.nz {
         for i in 0..grid.nx {
-            let idx = j * grid.nx + i;
-            let hl = h[j * grid.nx + i.saturating_sub(1)];
-            let hr = h[j * grid.nx + (i + 1).min(grid.nx - 1)];
-            let hd = h[j.saturating_sub(1) * grid.nx + i];
-            let hu = h[(j + 1).min(grid.nz - 1) * grid.nx + i];
-            let ddx = (hr - hl) / d2;
-            let ddz = (hu - hd) / d2;
-            let (nx, ny, nz) = (-ddx, 1.0, -ddz);
-            let inv = 1.0 / (nx * nx + ny * ny + nz * nz).sqrt();
-            out[idx] = [(nx * inv) as f32, (ny * inv) as f32, (nz * inv) as f32];
+            out[j * grid.nx + i] = node_normal(&h_at, i, j, grid.nx - 1, grid.nz - 1, grid.cell);
         }
     }
     out
@@ -90,6 +107,37 @@ pub fn chunk_mesh(
     cx: usize,
     cz: usize,
 ) -> ChunkMesh {
+    let nx = grid.nx;
+    chunk_mesh_view(
+        grid,
+        |i, j| hf.h[j * nx + i],
+        |i, j| normals_full[j * nx + i],
+        |i, j| coast[j * nx + i],
+        sea_level_m,
+        snow_line_m,
+        cells_per_chunk,
+        step,
+        cx,
+        cz,
+    )
+}
+
+/// The shared vertex loop: `h_at`, `normal_at` and `coast_at` supply
+/// world-node-indexed data. The whole-grid path and the sliced chunk
+/// stage both call this, so their meshes are identical by construction.
+#[allow(clippy::too_many_arguments)]
+pub fn chunk_mesh_view(
+    grid: &Grid,
+    h_at: impl Fn(usize, usize) -> f64,
+    normal_at: impl Fn(usize, usize) -> [f32; 3],
+    coast_at: impl Fn(usize, usize) -> f64,
+    sea_level_m: f64,
+    snow_line_m: f64,
+    cells_per_chunk: usize,
+    step: usize,
+    cx: usize,
+    cz: usize,
+) -> ChunkMesh {
     let per = cells_per_chunk / step; // cells per chunk side at mesh res
     let vside = per + 1;
     let i0 = cx * cells_per_chunk;
@@ -111,17 +159,17 @@ pub fn chunk_mesh(
         for vi in 0..vside {
             let gi = i0 + vi * step;
             let gj = j0 + vj * step;
-            let idx = gj * grid.nx + gi;
             let (x, z) = (grid.x(gi), grid.z(gj));
-            let h = hf.h[idx];
+            let h = h_at(gi, gj);
+            let n = normal_at(gi, gj);
             m.positions
                 .push([(x - ox) as f32, h as f32, (z - oz) as f32]);
-            m.normals.push(normals_full[idx]);
+            m.normals.push(n);
             m.uvs.push([x as f32, z as f32]);
             m.colors.push(vertex_color(
                 h,
-                coast[idx],
-                normals_full[idx][1],
+                coast_at(gi, gj),
+                n[1],
                 sea_level_m,
                 snow_line_m,
             ));

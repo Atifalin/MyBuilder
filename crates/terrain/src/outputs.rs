@@ -65,53 +65,7 @@ pub fn build_export_bundle(
     coast: &[f64],
     regions: &[RegionOutput],
 ) -> FileBundle {
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    let n = grid.len();
-
-    // --- layers ---
-    let mut r16 = Vec::with_capacity(n * 2);
-    for &h in &hf.h {
-        r16.extend_from_slice(&quantize(h, hf.h_min, hf.h_max).to_le_bytes());
-    }
-    files.push(("layers/height.r16".to_string(), r16));
-
-    // Cropped W/cell x D/cell version for Terrain3D (drops last row/col).
-    let mut r16t = Vec::with_capacity((grid.nx - 1) * (grid.nz - 1) * 2);
-    for j in 0..grid.nz - 1 {
-        for i in 0..grid.nx - 1 {
-            let q = quantize(hf.h[j * grid.nx + i], hf.h_min, hf.h_max);
-            r16t.extend_from_slice(&q.to_le_bytes());
-        }
-    }
-    files.push(("layers/height_terrain3d.r16".to_string(), r16t));
-    files.push(("layers/land.u8".to_string(), masks.land.clone()));
-    files.push(("layers/mountain.u8".to_string(), masks.mountain.clone()));
-    files.push(("layers/forest.u8".to_string(), masks.forest.clone()));
-
-    let layers_json = serde_json::json!({
-        "schema_version": 1,
-        "nx": grid.nx,
-        "nz": grid.nz,
-        "cell_size_m": grid.cell,
-        "origin": [grid.origin_x, grid.origin_z],
-        "h_min": hf.h_min,
-        "h_max": hf.h_max,
-        "step": quant_step(hf.h_min, hf.h_max),
-        "files": {
-            "height": "height.r16",
-            "height_terrain3d": "height_terrain3d.r16",
-            "land": "land.u8",
-            "mountain": "mountain.u8",
-            "forest": "forest.u8",
-        }
-    });
-    files.push(("layers/layers.json".to_string(), pretty(&layers_json)));
-
-    // --- preview ---
-    files.push((
-        "previews/hillshade.png".to_string(),
-        hillshade_png(grid, hf, world.sea_level_m),
-    ));
+    let mut files = build_layers_bundle(grid, world, hf, masks).files;
 
     // --- chunks + manifest ---
     let normals_full = normals(grid, hf);
@@ -202,6 +156,88 @@ pub fn build_export_bundle(
         }
     }
 
+    files.push((
+        MANIFEST_PATH.to_string(),
+        manifest_json(
+            project,
+            world,
+            grid,
+            hf,
+            chunk_entries,
+            region_manifest,
+            ncx * ncz,
+            total_v,
+            total_t,
+        ),
+    ));
+
+    FileBundle { files }
+}
+
+/// The layers-only bundle (world.layers stage): r16 x2, mask u8s,
+/// layers.json, hillshade preview.
+pub fn build_layers_bundle(
+    grid: &Grid,
+    world: &WorldRecipe,
+    hf: &HeightField,
+    masks: &Masks,
+) -> FileBundle {
+    let n = grid.len();
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut r16 = Vec::with_capacity(n * 2);
+    for &h in &hf.h {
+        r16.extend_from_slice(&quantize(h, hf.h_min, hf.h_max).to_le_bytes());
+    }
+    files.push(("layers/height.r16".to_string(), r16));
+    let mut r16t = Vec::with_capacity((grid.nx - 1) * (grid.nz - 1) * 2);
+    for j in 0..grid.nz - 1 {
+        for i in 0..grid.nx - 1 {
+            let q = quantize(hf.h[j * grid.nx + i], hf.h_min, hf.h_max);
+            r16t.extend_from_slice(&q.to_le_bytes());
+        }
+    }
+    files.push(("layers/height_terrain3d.r16".to_string(), r16t));
+    files.push(("layers/land.u8".to_string(), masks.land.clone()));
+    files.push(("layers/mountain.u8".to_string(), masks.mountain.clone()));
+    files.push(("layers/forest.u8".to_string(), masks.forest.clone()));
+    let layers_json = serde_json::json!({
+        "schema_version": 1,
+        "nx": grid.nx,
+        "nz": grid.nz,
+        "cell_size_m": grid.cell,
+        "origin": [grid.origin_x, grid.origin_z],
+        "h_min": hf.h_min,
+        "h_max": hf.h_max,
+        "step": quant_step(hf.h_min, hf.h_max),
+        "files": {
+            "height": "height.r16",
+            "height_terrain3d": "height_terrain3d.r16",
+            "land": "land.u8",
+            "mountain": "mountain.u8",
+            "forest": "forest.u8",
+        }
+    });
+    files.push(("layers/layers.json".to_string(), pretty(&layers_json)));
+    files.push((
+        "previews/hillshade.png".to_string(),
+        hillshade_png(grid, hf, world.sea_level_m),
+    ));
+    FileBundle { files }
+}
+
+/// manifest.json bytes from assembled chunk/region entries and totals.
+#[allow(clippy::too_many_arguments)]
+pub fn manifest_json(
+    project: &ProjectFile,
+    world: &WorldRecipe,
+    grid: &Grid,
+    hf: &HeightField,
+    chunk_entries: Vec<serde_json::Value>,
+    region_manifest: Vec<serde_json::Value>,
+    n_chunks: usize,
+    total_v: usize,
+    total_t: usize,
+) -> Vec<u8> {
     let manifest = serde_json::json!({
         "schema_version": 1,
         "generator": format!("mybuilder {}", env!("CARGO_PKG_VERSION")),
@@ -217,14 +253,12 @@ pub fn build_export_bundle(
         "chunks": chunk_entries,
         "regions": region_manifest,
         "totals": {
-            "chunks": ncx * ncz,
+            "chunks": n_chunks,
             "vertices": total_v,
             "triangles": total_t,
         }
     });
-    files.push((MANIFEST_PATH.to_string(), pretty(&manifest)));
-
-    FileBundle { files }
+    pretty(&manifest)
 }
 
 fn pretty(v: &serde_json::Value) -> Vec<u8> {

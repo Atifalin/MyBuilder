@@ -265,13 +265,33 @@ fn glb_structure() {
     assert_eq!(prim["indices"], 4);
 }
 
-fn tmpdir(tag: &str) -> PathBuf {
+struct TestDir(PathBuf);
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+fn tmpdir(tag: &str) -> TestDir {
     let d = Path::new(DIR)
         .join("../../target/s3-tests")
         .join(format!("{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TestDir(d)
 }
 
 #[test]
@@ -326,7 +346,7 @@ fn pipeline_stages_produce_bundle() {
     let g = grid();
     let p = small_project();
     let w = small_world();
-    let mut pipe = Pipeline::new(p.seed);
+    let mut pipe = Pipeline::new(p.seed, p.generator_version);
     pipe.add(Box::new(MasksStage {
         code_version: 1,
         grid: g,
@@ -670,4 +690,83 @@ fn golden_manifest_with_region() {
         .count();
     assert_eq!(sup, 4);
     assert_eq!(m["regions"][0]["id"], "village-1");
+}
+
+/// S10: the sliced region-chunk path must be byte-identical to the
+/// whole-region path it replaced.
+#[test]
+fn sliced_region_chunk_matches_full_region() {
+    let (g, _m, dist, hf) = computed();
+    let w = world_with_region();
+    let region = &w.detail_regions[0];
+    let normals_full = mb_terrain::mesh::normals(&g, &hf);
+    let terrain = w.terrain.feel.resolve(&w.terrain.overrides);
+    let ctx = mb_terrain::HeightCtx::new(g, &dist, w.sea_level_m, 1, terrain, w.profile);
+    let rb = mb_terrain::region::build_region_height(&ctx, &hf, region, 128, 4);
+    let rnorms = mb_terrain::region::region_normals(&ctx, &normals_full, &rb, 4);
+    for (cx, cz) in [(1usize, 1usize), (2, 1), (1, 2), (2, 2)] {
+        let old = mb_terrain::region::region_chunk_mesh(
+            &ctx,
+            region,
+            128,
+            &rb,
+            &rnorms,
+            w.sea_level_m,
+            w.profile.snow_line_m,
+            cx,
+            cz,
+        );
+        let key = format!("{cx}_{cz}");
+        let id = mb_seed::EntityId::from_path(
+            1,
+            &[("world", "main"), ("region", &region.id), ("chunk", &key)],
+        );
+        let old_glb =
+            mb_terrain::glb::chunk_glb(&old, &format!("chunk_{cx}_{cz}"), &id.to_string(), cx, cz);
+        // Sliced path: same GLB from the window slice.
+        let slice = mb_terrain::slice::encode_region_slice(
+            &g,
+            &hf,
+            &dist.coast,
+            &dist.mountain,
+            128,
+            4,
+            cx,
+            cz,
+        );
+        let rs = mb_terrain::slice::decode_region_slice(&slice);
+        let art = mb_terrain::region_slice::run_region_chunk(&g, &rs, &w, region, 1, cx, cz);
+        assert_eq!(
+            art.bytes[mb_terrain::stages::CHUNK_HEADER..],
+            old_glb[..],
+            "chunk {cx},{cz}: sliced != whole-region"
+        );
+    }
+    // And the coarse chunk slice path matches chunk_mesh + glb.
+    let cs = mb_terrain::slice::encode_chunk_slice(&g, &hf, &dist.coast, 128, 0, 0);
+    let cdec = mb_terrain::slice::decode_chunk_slice(&cs);
+    let h_at = |i: usize, j: usize| cdec.h_at(i, j);
+    let n_at =
+        |i: usize, j: usize| mb_terrain::mesh::node_normal(&h_at, i, j, g.nx - 1, g.nz - 1, g.cell);
+    let c_at = |i: usize, j: usize| cdec.coast_at(i, j);
+    let new_mesh =
+        mb_terrain::mesh::chunk_mesh_view(&g, h_at, n_at, c_at, 0.0, 300.0, 128, 4, 0, 0);
+    let old_mesh = mb_terrain::mesh::chunk_mesh(
+        &g,
+        &hf,
+        &normals_full,
+        &dist.coast,
+        0.0,
+        300.0,
+        128,
+        4,
+        0,
+        0,
+    );
+    let id = mb_seed::EntityId::from_path(1, &[("world", "main"), ("chunk", "0_0")]);
+    assert_eq!(
+        mb_terrain::glb::chunk_glb(&new_mesh, "chunk_0_0", &id.to_string(), 0, 0),
+        mb_terrain::glb::chunk_glb(&old_mesh, "chunk_0_0", &id.to_string(), 0, 0),
+        "sliced coarse chunk != full-grid chunk"
+    );
 }

@@ -85,6 +85,19 @@ impl FineGrid {
 /// so the diagonal runs b--c; that convention is reproduced exactly here.
 /// `mesh_step` is the coarse mesh stride in cells.
 pub fn coarse_mesh_height(grid: &Grid, hf: &HeightField, mesh_step: usize, x: f64, z: f64) -> f64 {
+    let n = grid.nx;
+    coarse_mesh_height_at(&|i, j| hf.h[j * n + i], grid, mesh_step, x, z)
+}
+
+/// Same as [`coarse_mesh_height`] but reads heights through `h_at(i, j)`
+/// by world node index — the windowed (sliced) path feeds a local view.
+pub fn coarse_mesh_height_at(
+    h_at: &dyn Fn(usize, usize) -> f64,
+    grid: &Grid,
+    mesh_step: usize,
+    x: f64,
+    z: f64,
+) -> f64 {
     let sm = grid.cell * mesh_step as f64;
     // Quad index in coarse-mesh space; clamp to the last valid quad.
     let fx = ((x - grid.origin_x) / sm).clamp(0.0, (grid.nx - 1) as f64 / mesh_step as f64 - 1e-9);
@@ -94,11 +107,10 @@ pub fn coarse_mesh_height(grid: &Grid, hf: &HeightField, mesh_step: usize, x: f6
     let u = fx - qx as f64;
     let v = fz - qz as f64;
     let (i, j) = (qx * mesh_step, qz * mesh_step);
-    let n = grid.nx;
-    let ha = hf.h[j * n + i];
-    let hb = hf.h[j * n + i + mesh_step];
-    let hc = hf.h[(j + mesh_step) * n + i];
-    let hd = hf.h[(j + mesh_step) * n + i + mesh_step];
+    let ha = h_at(i, j);
+    let hb = h_at(i + mesh_step, j);
+    let hc = h_at(i, j + mesh_step);
+    let hd = h_at(i + mesh_step, j + mesh_step);
     if u + v <= 1.0 {
         // Triangle (a, c, b): h = ha + u*(hb - ha) + v*(hc - ha)
         ha + u * (hb - ha) + v * (hc - ha)
@@ -117,6 +129,20 @@ pub fn coarse_mesh_normal(
     x: f64,
     z: f64,
 ) -> [f64; 3] {
+    let n = grid.nx;
+    coarse_mesh_normal_at(&|i, j| normals_full[j * n + i], grid, mesh_step, x, z)
+}
+
+/// Same as [`coarse_mesh_normal`] but reads mesh-vertex normals through
+/// `n_at(i, j)` by world node index — the windowed path computes them
+/// from slice heights with [`crate::mesh::node_normal`].
+pub fn coarse_mesh_normal_at(
+    n_at: &dyn Fn(usize, usize) -> [f32; 3],
+    grid: &Grid,
+    mesh_step: usize,
+    x: f64,
+    z: f64,
+) -> [f64; 3] {
     let sm = grid.cell * mesh_step as f64;
     // Valid quads are 0..=span-1; clamp like coarse_mesh_height so the
     // last quad is used rather than extrapolated past span-2.
@@ -128,12 +154,10 @@ pub fn coarse_mesh_normal(
     let qz = (fz.floor() as usize).min(last);
     let u = fx - qx as f64;
     let v = fz - qz as f64;
-    let n = grid.nx;
-    let get = |i: usize, j: usize| normals_full[j * n + i];
-    let a = get(qx * mesh_step, qz * mesh_step);
-    let b = get((qx + 1) * mesh_step, qz * mesh_step);
-    let c = get(qx * mesh_step, (qz + 1) * mesh_step);
-    let d = get((qx + 1) * mesh_step, (qz + 1) * mesh_step);
+    let a = n_at(qx * mesh_step, qz * mesh_step);
+    let b = n_at((qx + 1) * mesh_step, qz * mesh_step);
+    let c = n_at(qx * mesh_step, (qz + 1) * mesh_step);
+    let d = n_at((qx + 1) * mesh_step, (qz + 1) * mesh_step);
     let mut out = [0.0f64; 3];
     for k in 0..3 {
         let (a, b, c, d) = (a[k] as f64, b[k] as f64, c[k] as f64, d[k] as f64);

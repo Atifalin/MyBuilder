@@ -44,7 +44,15 @@ enum Command {
     /// Print the version and determinism probe hash.
     Probe,
     /// Validate, run the terrain pipeline and write outputs.
-    Build { dir: PathBuf },
+    Build {
+        dir: PathBuf,
+        /// Wipe cache + listed outputs first (requires --yes).
+        #[arg(long)]
+        clean: bool,
+        /// Confirm --clean.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Set generator_version to the current one.
     Upgrade { dir: PathBuf },
 }
@@ -159,84 +167,100 @@ fn cmd_info(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_build(dir: &Path) -> Result<ExitCode, String> {
-    let (project, world, diags) = mb_schema::load_project(dir).map_err(|e| e.to_string())?;
-    print_diags(&diags);
-    if has_errors(&diags) {
-        return Ok(ExitCode::FAILURE);
+fn cmd_build(dir: &Path, clean: bool, yes: bool) -> Result<ExitCode, String> {
+    if clean && !yes {
+        return Err(
+            "--clean deletes cache/ and all previously listed outputs; pass --yes to confirm"
+                .to_string(),
+        );
     }
-    let cell = project.world_scale.cell_size_m;
-    let grid = mb_terrain::Grid::new(world.extent.width_m, world.extent.depth_m, cell);
-    let mut pipe = mb_pipeline::Pipeline::new(project.seed);
-    pipe.add(Box::new(mb_terrain::stages::MasksStage {
-        code_version: 1,
-        grid,
-        mode: world.mode,
-        shapes: world.shapes.clone(),
-        cell_size_m: cell,
-        extent: world.extent,
-        generator_version: project.generator_version,
-    }));
-    pipe.add(Box::new(mb_terrain::stages::DistanceStage::new(
-        grid, cell, 1,
-    )));
-    pipe.add(Box::new(mb_terrain::stages::HeightStage::new(
-        grid,
-        project.clone(),
-        world.clone(),
-        1,
-    )));
-    for region in world.detail_regions.clone() {
-        pipe.add(Box::new(mb_terrain::stages::RegionStage::new(
-            grid,
-            project.clone(),
-            world.clone(),
-            region,
-            1,
-        )));
-    }
-    pipe.add(Box::new(mb_terrain::stages::ExportStage::new(
-        grid, project, world, 1,
-    )));
-    let mut cache = mb_pipeline::Cache::default();
-    let report = pipe.run(&mut cache).map_err(|e| e.to_string())?;
-    for id in &report.executed {
-        let us = report.durations_us.get(id).copied().unwrap_or(0);
-        println!("stage {id}: ran in {:.3} s", us as f64 / 1e6);
-    }
-    for id in &report.reused {
-        println!("stage {id}: reused");
-    }
-    // The export artifact is the whole output bundle.
-    let bundle_bytes = cache
-        .get(mb_terrain::stages::ExportStage::ID)
-        .ok_or("export artifact missing")?
-        .bytes
-        .clone();
-    let bundle = mb_terrain::outputs::FileBundle::decode(&bundle_bytes);
-    let mut h_min = f64::NAN;
-    let mut h_max = f64::NAN;
-    let mut totals = String::new();
-    for (rel, data) in &bundle.files {
-        if rel == mb_terrain::outputs::MANIFEST_PATH {
-            let m: serde_json::Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
-            h_min = m["h_min"].as_f64().unwrap_or(f64::NAN);
-            h_max = m["h_max"].as_f64().unwrap_or(f64::NAN);
-            let t = &m["totals"];
-            totals = format!(
-                "{} chunks, {} vertices, {} triangles",
-                t["chunks"], t["vertices"], t["triangles"]
-            );
+    let t0 = std::time::Instant::now();
+    let rep = mb_terrain::build::build_project(dir, &mb_terrain::build::BuildOptions { clean })
+        .map_err(|e| e.to_string())?;
+    // Grouped stage report.
+    let (mut g_run, mut c_run, mut r_run) = (0, 0, 0);
+    let (mut g_re, mut c_re, mut r_re) = (0, 0, 0);
+    let (mut g_us, mut c_us, mut r_us) = (0u64, 0u64, 0u64);
+    let group = |id: &str| {
+        if id.starts_with("world.chunk.") {
+            1
+        } else if id.starts_with("world.region.") {
+            2
+        } else {
+            0
+        }
+    };
+    for id in &rep.run.executed {
+        match group(id) {
+            1 => {
+                c_run += 1;
+                c_us += rep.run.durations_us.get(id).copied().unwrap_or(0);
+            }
+            2 => {
+                r_run += 1;
+                r_us += rep.run.durations_us.get(id).copied().unwrap_or(0);
+            }
+            _ => {
+                g_run += 1;
+                g_us += rep.run.durations_us.get(id).copied().unwrap_or(0);
+            }
         }
     }
-    let wr = mb_terrain::outputs::write_outputs(dir, &bundle).map_err(|e| e.to_string())?;
-    println!("files written: {}", wr.written.len());
-    for f in &wr.written {
-        println!("  wrote {f}");
+    for id in &rep.run.reused {
+        match group(id) {
+            1 => c_re += 1,
+            2 => r_re += 1,
+            _ => g_re += 1,
+        }
     }
-    println!("files unchanged: {}", wr.unchanged.len());
-    println!("h_min {h_min:.3} m, h_max {h_max:.3} m");
-    println!("{totals}");
+    let n_chunks_total = c_run + c_re;
+    let n_reg_total = r_run + r_re;
+    println!(
+        "global stages: {g_run} ran, {g_re} reused ({:.3} s)",
+        g_us as f64 / 1e6
+    );
+    println!(
+        "chunks: {c_run} ran of {n_chunks_total} ({c_re} cached, {:.3} s)",
+        c_us as f64 / 1e6
+    );
+    if n_reg_total > 0 {
+        println!(
+            "region chunks: {r_run} ran of {n_reg_total} ({r_re} cached, {:.3} s)",
+            r_us as f64 / 1e6
+        );
+    }
+    let cs = &rep.run.cache;
+    println!(
+        "cache: {} hits, {} misses, {} corrupt, {} missing, {} blobs written, {} deleted",
+        cs.hits, cs.misses, cs.corrupt, cs.missing, cs.blobs_written, cs.blobs_deleted
+    );
+    println!("files written: {}", rep.write.written);
+    println!("files unchanged: {}", rep.write.unchanged);
+    if rep.write.deleted > 0 {
+        println!("files deleted: {}", rep.write.deleted);
+    }
+    if rep.write.skipped_unsafe > 0 {
+        println!(
+            "warning: {} manifest/output paths failed the confinement check and were skipped",
+            rep.write.skipped_unsafe
+        );
+    }
+    // h range + totals from the manifest.
+    if let Some((_, data)) = rep
+        .outputs
+        .files
+        .iter()
+        .find(|(p, _)| p == mb_terrain::outputs::MANIFEST_PATH)
+        && let Ok(m) = serde_json::from_slice::<serde_json::Value>(data)
+    {
+        let t = &m["totals"];
+        println!("h_min {:.3} m, h_max {:.3} m", m["h_min"], m["h_max"]);
+        println!(
+            "{} chunks, {} vertices, {} triangles",
+            t["chunks"], t["vertices"], t["triangles"]
+        );
+    }
+    println!("total wall time: {:.3} s", t0.elapsed().as_secs_f64());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -278,7 +302,7 @@ fn main() -> ExitCode {
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),
         Command::Probe => Ok(cmd_probe()),
-        Command::Build { dir } => cmd_build(&dir),
+        Command::Build { dir, clean, yes } => cmd_build(&dir, clean, yes),
         Command::Upgrade { dir } => cmd_upgrade(&dir),
     };
     match result {

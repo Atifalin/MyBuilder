@@ -1,4 +1,6 @@
-use mb_pipeline::{Artifact, Cache, Pipeline, PipelineError, Stage};
+use mb_pipeline::{
+    Artifact, Cache, CacheStore, DiskCache, Pipeline, PipelineError, SlicedStage, Stage,
+};
 
 const DIR: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -64,7 +66,7 @@ impl Stage for TestStage {
 }
 
 fn diamond() -> Pipeline {
-    let mut p = Pipeline::new(42);
+    let mut p = Pipeline::new(42, 1);
     p.add(Box::new(TestStage::new("a", &[]).with_params(b"pa")));
     p.add(Box::new(TestStage::new("b", &["a"]).with_params(b"pb")));
     p.add(Box::new(
@@ -96,7 +98,7 @@ fn changed_params_rerun_only_dependents() {
     let mut cache = Cache::default();
     diamond().run(&mut cache).unwrap();
     // Same pipeline but c has new params (echo_params => output changes).
-    let mut p2 = Pipeline::new(42);
+    let mut p2 = Pipeline::new(42, 1);
     p2.add(Box::new(TestStage::new("a", &[]).with_params(b"pa")));
     p2.add(Box::new(TestStage::new("b", &["a"]).with_params(b"pb")));
     p2.add(Box::new(
@@ -114,7 +116,7 @@ fn changed_params_rerun_only_dependents() {
 fn early_cutoff_when_output_unchanged() {
     let mut cache = Cache::default();
     diamond().run(&mut cache).unwrap();
-    let mut p2 = Pipeline::new(42);
+    let mut p2 = Pipeline::new(42, 1);
     p2.add(Box::new(TestStage::new("a", &[]).with_params(b"pa")));
     // b's params changed, but b does not echo params so its output is
     // identical: d's input hash is unchanged and d is reused.
@@ -134,7 +136,7 @@ fn early_cutoff_when_output_unchanged() {
 fn incremental_matches_full_rebuild() {
     let mut cache = Cache::default();
     let r1 = diamond().run(&mut cache).unwrap();
-    let mut p2 = Pipeline::new(42);
+    let mut p2 = Pipeline::new(42, 1);
     p2.add(Box::new(TestStage::new("a", &[]).with_params(b"pa")));
     p2.add(Box::new(TestStage::new("b", &["a"]).with_params(b"pb")));
     p2.add(Box::new(
@@ -145,7 +147,7 @@ fn incremental_matches_full_rebuild() {
     p2.add(Box::new(TestStage::new("d", &["b", "c"])));
     let inc = p2.run(&mut cache).unwrap();
     let mut fresh = Cache::default();
-    let mut full = Pipeline::new(42);
+    let mut full = Pipeline::new(42, 1);
     full.add(Box::new(TestStage::new("a", &[]).with_params(b"pa")));
     full.add(Box::new(TestStage::new("b", &["a"]).with_params(b"pb")));
     full.add(Box::new(
@@ -172,7 +174,7 @@ fn golden_diamond_outputs() {
 
 #[test]
 fn cycle_is_rejected() {
-    let mut p = Pipeline::new(1);
+    let mut p = Pipeline::new(1, 1);
     p.add(Box::new(TestStage::new("x", &["y"])));
     p.add(Box::new(TestStage::new("y", &["x"])));
     let mut cache = Cache::default();
@@ -181,7 +183,7 @@ fn cycle_is_rejected() {
 
 #[test]
 fn duplicate_id_is_rejected() {
-    let mut p = Pipeline::new(1);
+    let mut p = Pipeline::new(1, 1);
     p.add(Box::new(TestStage::new("x", &[])));
     p.add(Box::new(TestStage::new("x", &[])));
     let mut cache = Cache::default();
@@ -193,11 +195,158 @@ fn duplicate_id_is_rejected() {
 
 #[test]
 fn unknown_dep_is_rejected() {
-    let mut p = Pipeline::new(1);
+    let mut p = Pipeline::new(1, 1);
     p.add(Box::new(TestStage::new("x", &["missing"])));
     let mut cache = Cache::default();
     assert!(matches!(
         p.run(&mut cache),
         Err(PipelineError::UnknownDep { .. })
     ));
+}
+
+// --- S10: sliced stages + cache stores ---
+
+fn deps_holder() -> Vec<String> {
+    vec!["src".to_string()]
+}
+
+struct Source(u32);
+impl Stage for Source {
+    fn id(&self) -> &str {
+        "src"
+    }
+    fn deps(&self) -> &[String] {
+        &[]
+    }
+    fn code_version(&self) -> u32 {
+        1
+    }
+    fn params(&self) -> Vec<u8> {
+        self.0.to_le_bytes().to_vec()
+    }
+    fn run(&self, _i: &[&Artifact], _s: u64) -> Artifact {
+        Artifact::new(vec![self.0 as u8, 42])
+    }
+}
+
+#[test]
+fn sliced_ignores_upstream_changes_outside_slice() {
+    // src emits [params_byte, 42]; slice takes byte 0 only, so a params
+    // change re-executes src AND changes byte0 -> slice changes too.
+    // To isolate, make a source whose params change byte 1 only.
+    // byte0 is always 9; byte1 varies with params so a params change
+    // alters the artifact hash but never the slice.
+    struct Src2(u8);
+    impl Stage for Src2 {
+        fn id(&self) -> &str {
+            "src"
+        }
+        fn deps(&self) -> &[String] {
+            &[]
+        }
+        fn code_version(&self) -> u32 {
+            1
+        }
+        fn params(&self) -> Vec<u8> {
+            vec![self.0]
+        }
+        fn run(&self, _i: &[&Artifact], _s: u64) -> Artifact {
+            Artifact::new(vec![9, self.0])
+        }
+    }
+    let d = deps_holder();
+    struct Sl2 {
+        d: Vec<String>,
+    }
+    impl SlicedStage for Sl2 {
+        fn id(&self) -> &str {
+            "sl"
+        }
+        fn deps(&self) -> &[String] {
+            &self.d
+        }
+        fn code_version(&self) -> u32 {
+            1
+        }
+        fn params(&self) -> Vec<u8> {
+            vec![]
+        }
+        fn slice(&self, inputs: &[&Artifact]) -> Vec<u8> {
+            vec![inputs[0].bytes[0]]
+        }
+        fn run(&self, slice: &[u8], _s: u64) -> Artifact {
+            Artifact::new(slice.to_vec())
+        }
+    }
+    // First run: src executes, sl executes.
+    let mut cache = Cache::default();
+    let mut p = Pipeline::new(7, 1);
+    p.add(Box::new(Src2(1)));
+    p.add_sliced(Box::new(Sl2 { d: d.clone() }));
+    let r1 = p.run(&mut cache).unwrap();
+    assert!(r1.executed.contains(&"src".to_string()));
+    assert!(r1.executed.contains(&"sl".to_string()));
+    // Same project_seed, but src's params change -> src's OUTPUT hash
+    // changes (byte1) while the SLICE (byte0=9) stays identical, so sl
+    // is reused even though its dep re-executed.
+    let mut p2 = Pipeline::new(7, 1);
+    p2.add(Box::new(Src2(2)));
+    p2.add_sliced(Box::new(Sl2 { d }));
+    let r2 = p2.run(&mut cache).unwrap();
+    assert!(r2.executed.contains(&"src".to_string()));
+    assert!(r2.reused.contains(&"sl".to_string()), "report: {r2:?}");
+}
+
+#[test]
+fn disk_and_memory_cache_agree() {
+    let dir = std::env::temp_dir().join(format!("mbpipe_disk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    struct Guard(std::path::PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = Guard(dir.clone());
+    let d = deps_holder();
+    struct Sl3 {
+        d: Vec<String>,
+    }
+    impl SlicedStage for Sl3 {
+        fn id(&self) -> &str {
+            "sl"
+        }
+        fn deps(&self) -> &[String] {
+            &self.d
+        }
+        fn code_version(&self) -> u32 {
+            1
+        }
+        fn params(&self) -> Vec<u8> {
+            vec![]
+        }
+        fn slice(&self, inputs: &[&Artifact]) -> Vec<u8> {
+            inputs[0].bytes.clone()
+        }
+        fn run(&self, slice: &[u8], _s: u64) -> Artifact {
+            Artifact::new(slice.to_vec())
+        }
+    }
+    let mk = |d: Vec<String>| {
+        let mut p = Pipeline::new(1, 1);
+        p.add(Box::new(Source(5)));
+        p.add_sliced(Box::new(Sl3 { d }));
+        p
+    };
+    let mut mem = Cache::default();
+    let rm1 = mk(d.clone()).run(&mut mem).unwrap();
+    let rm2 = mk(d.clone()).run(&mut mem).unwrap();
+    let mut disk = DiskCache::open(&dir).unwrap();
+    let rd1 = mk(d.clone()).run(&mut disk).unwrap();
+    disk.finish(&mk(d.clone()).stage_ids());
+    let rd2 = mk(d).run(&mut disk).unwrap();
+    assert_eq!(rm1.outputs, rd1.outputs);
+    assert_eq!(rm2.outputs, rd2.outputs);
+    assert_eq!(rd1.executed, rm1.executed);
+    assert_eq!(rd2.reused, rm2.reused);
 }

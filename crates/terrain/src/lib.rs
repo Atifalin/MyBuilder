@@ -7,10 +7,13 @@
 //! `j*nx + i` for node (i, j) at world `(x_i, z_j)`. Heights are f64
 //! internally and quantized to u16 only on disk.
 
+pub mod build;
 pub mod glb;
 pub mod mesh;
 pub mod outputs;
 pub mod region;
+pub mod region_slice;
+pub mod slice;
 pub mod stages;
 
 /// Grid geometry shared by all stages.

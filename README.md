@@ -9,17 +9,18 @@ Blender.
 
 ## Status
 
-Phase 1 foundation is done: the deterministic core (seeds, schema, noise,
-incremental pipeline), the `mybuilder` CLI, and the S2 bindings gate, which
-proves the same Rust function returns bit-identical results from the CLI,
-from Godot 4.7.1 (GDExtension) and from Blender 5.2.3 (PyO3 module). The
-gate itself is verified on macOS arm64 only; Windows and Linux adapter
-builds are compile-checked in CI but not yet run there.
+Phase 1 through S10 are done: deterministic core crates and CLI, the
+three-way bindings gate (CLI / Godot 4.7 / Blender 5.2 all returning one
+probe hash), terrain generation to chunked glTF imported by both
+engines, seamless higher-detail regions, and the persistent rebuild
+cache with per-chunk invalidation. Next up: the Tauri app shell.
 
-Planning documents: [my-builder-plan.md](my-builder-plan.md),
+Planning docs: [my-builder-plan.md](my-builder-plan.md),
 [my-builder-goals-and-packs.md](my-builder-goals-and-packs.md),
 [my-builder-algorithms-and-gaps.md](my-builder-algorithms-and-gaps.md).
-Contributor rules: [AGENTS.md](AGENTS.md).
+
+The engine gates are verified on **macOS arm64** only; Windows/Linux
+adapter builds are compile-checked in CI.
 
 ## Prerequisites
 
@@ -32,40 +33,34 @@ Contributor rules: [AGENTS.md](AGENTS.md).
 
 ## Quick start
 
-```bash
+```sh
 git clone https://github.com/Atifalin/MyBuilder.git && cd MyBuilder
-cargo build --workspace
+cargo build --release -p mb-cli
+cargo run --release -p mb-cli -- new my-world --seed 0000000000000001
 ```
-
-Create and inspect a project:
-
-```bash
-$ cargo run -p mb-cli -- new my-world --seed 0000000000000001
+```
 created project "My World" at my-world
 seed: 0000000000000001
-
-$ cargo run -p mb-cli -- validate my-world
+```
+```sh
+cargo run --release -p mb-cli -- validate my-world
+cargo run --release -p mb-cli -- info my-world
+cargo run --release -p mb-cli -- hash my-world
+cargo run --release -p mb-cli -- probe
+```
+```
 ok: no diagnostics
-
-$ cargo run -p mb-cli -- info my-world
 name: My World
 seed: 0000000000000001
 extent: 2048 x 2048 m
 terrain: feel=Hilly octaves=5 gain=0.5 lacunarity=2 relief_m=120 ridged_mix=0.15
 chunk grid: 8 x 8 chunks of 256 m
 vertices per chunk side: 257
-
-$ cargo run -p mb-cli -- hash my-world
-project 35ef84f2312f2539a52f1c76752c848a533e818a1d7f5b2f327709f0d15c5594
-world   250c175afda026153f85ee35b32938e9eb8405a6d54a9d26bfe0a243c91afb3f
-
-$ cargo run -p mb-cli -- probe
+project dde70d4eb73e82c6fec5da06d078868d5a1c900cd04b3f6b2bf18253d8ad6bed
+world   1c233b7481c12a3335f87803ab9010b81bd968bdeb8217f96043dc778e7f3575
 version 0.1.0
 probe 2ea5ca993b84f1be29e078663e8f2b0edff151170f71fdd346ade3ffce37f3b7
 ```
-
-`validate` prints one line per finding as `severity code path: message
-(hint: …)`, supports `--json`, and exits 1 when errors exist.
 
 ## Project folder format
 
@@ -159,32 +154,49 @@ plans in the XZ plane, seeds as 16-char lowercase hex strings.
 
 ## Build a world
 
-```bash
-$ cargo run --release -p mb-cli -- build my-world
-stage world.masks: ran in 0.008 s
-stage world.distance: ran in 0.114 s
-stage world.height: ran in 0.301 s
-stage world.export: ran in 0.148 s
+`mybuilder build <dir>` validates, runs the stage DAG against the
+persistent cache, and writes all outputs atomically:
+
+```
+global stages: 5 ran, 0 reused (0.671 s)
+chunks: 64 ran of 64 (0 cached, 0.021 s)
+cache: 0 hits, 69 misses, 0 corrupt, 0 missing, 69 blobs written, 0 deleted
 files written: 72
 files unchanged: 0
-h_min -40.000 m, h_max 76.419 m
+h_min -40.0 m, h_max 67.00906494119648 m
 64 chunks, 270400 vertices, 524288 triangles
+total wall time: 1.326 s
 ```
 
-It writes, into the project folder:
+Generated files: `layers/height.r16` + `height_terrain3d.r16` + mask
+u8s + `layers.json`; `previews/hillshade.png`;
+`exports/terrain/chunk_{cx}_{cz}.glb` (positions, normals, colors, uvs);
+`exports/terrain/regions/<id>/chunk_{cx}_{cz}.glb` for detail-region
+chunks (coarse entries get `"superseded_by": "<id>"`); and
+`exports/terrain/manifest.json` with per-chunk ids, origins, counts and
+blake3s.
 
-```
-layers/height.r16            full-res u16 height (2049x2049 for 2048 m)
-layers/height_terrain3d.r16  cropped 2048x2048 variant for Terrain3D
-layers/land.u8  mountain.u8  forest.u8
-layers/layers.json           dims, origin, h_min/h_max, step, file list
-previews/hillshade.png       shaded-relief preview, 1 px per 2 m
-exports/terrain/chunk_*.glb  one glTF mesh per 256 m chunk (mesh_step 4)
-exports/terrain/manifest.json  chunk index + totals (written last, atomic)
+`detail_regions` in world.json declares higher-detail regions:
+
+```json
+"detail_regions": [
+  { "id": "village-1", "chunk_min": [2, 2], "chunk_max": [3, 3],
+    "cell_divisor": 2, "mesh_step_cells": 1, "extra_octaves": 2,
+    "blend_band_m": 16.0 }
+]
 ```
 
-Only changed files are rewritten (blake3 compare), so a rebuild with no
-edits reports `files written: 0`.
+`cell_divisor` splits the grid cell (fine spacing = cell / divisor);
+`mesh_step_cells` is the fine vertex stride; `extra_octaves` continues
+the base fBm series (max 6); `blend_band_m` is the border band where the
+fine surface blends onto the coarse mesh so shared border vertices are
+bit-identical and in-between ones sit exactly on the coarse edge.
+
+`generator_version` in project.json pins the algorithm set; old projects
+keep old output until `mybuilder upgrade <dir>` bumps it. Files listed
+in the previous manifest but not the new one are deleted; every written
+or deleted path must pass a confinement check (no `..`, no absolute or
+`:` paths) so a tampered manifest can't touch files outside the project.
 
 ## Repository layout
 
@@ -203,22 +215,21 @@ edits reports `files written: 0`.
 
 ## Testing
 
-```bash
+```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Golden tests pin BLAKE3 digests of generator output at
-`crates/*/tests/golden/*.blake3` and are the cross-OS determinism gate (CI
-runs them on all three OSes). After an intentional output change, run
-`MB_BLESS=1 cargo test --workspace` and review the golden diffs before
-committing.
+Golden tests compare outputs to `crates/*/tests/golden/*.blake3`.
+Re-bless with `MB_BLESS=1 MB_BLESS_REASON="why" cargo test` — every
+bless appends a row to `GOLDEN_CHANGELOG.md`, and a test enforces that
+the last row per golden matches the file, so a forgotten log fails CI.
 
-Determinism rules in short: no `HashMap` iteration in outputs, no libm
-transcendental functions or `mul_add` in generation paths, all randomness
-from `mb_seed`, noise evaluated in world coordinates. See
-[AGENTS.md](AGENTS.md) for the full list.
+Gates: `scripts/s2-bindings-gate.sh` (CLI = Godot = Blender probe),
+`scripts/s3-terrain-gate.sh` (build + both engine imports),
+`scripts/s4-seams-gate.sh` (detail-region seams). Determinism rules in
+AGENTS.md.
 
 ## Using the core from Godot
 
@@ -239,29 +250,66 @@ where path entries are `"kind:key"` strings.
 
 ## Using the core from Blender
 
-```bash
+Build the abi3 wheel with maturin and install it with Blender's own
+Python:
+
+```sh
 python3 -m venv target/maturin-venv
-target/maturin-venv/bin/pip install maturin
-(cd adapters/blender && ../../target/maturin-venv/bin/maturin build --release -o ../../target/wheels)
+target/maturin-venv/bin/pip install maturin==1.15.0
+target/maturin-venv/bin/maturin build --release -m adapters/blender/Cargo.toml
 /Applications/Blender.app/Contents/Resources/5.2/python/bin/python3.13 \
-    -m pip install --target target/blender-site \
+    -m pip install --upgrade --target target/blender-site \
     target/wheels/mybuilder_core-0.1.0-cp311-abi3-macosx_11_0_arm64.whl
 /Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
-    --python-expr "import sys; sys.path.insert(0,'$PWD/target/blender-site'); \
-                   import mybuilder_core as m; print(m.version(), m.probe())"
+    --python-expr "import sys; sys.path.insert(0,'$PWD/target/blender-site'); import mybuilder_core as m; print('probe', m.probe())"
+# probe 2ea5ca993b84f1be29e078663e8f2b0edff151170f71fdd346ade3ffce37f3b7
 ```
 
-The module exposes `version()`, `probe()`, `sample_fbm(...)` and
-`derive_seed_hex(root, [(kind, key), ...])`. The wheel is abi3
-(`cp311-abi3`), so it loads in Blender's bundled Python 3.13.
+Import a built world (checks object count, world bounds, height range):
 
-Run the whole gate in one step (uses `GODOT_BIN`/`BLENDER_BIN` env vars or
-the /Applications defaults):
-
-```bash
-bash scripts/s2-bindings-gate.sh
-# prints a table and exits 0 only if CLI, Godot and Blender agree
+```sh
+/Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
+    --python adapters/blender/scripts/import_world.py -- \
+    --manifest /abs/path/to/exports/terrain/manifest.json
+# S3 BLENDER PASS
 ```
+
+## Rebuilds and the persistent cache (S10)
+
+`mybuilder build` keeps a content-addressed cache in `<project>/cache/`
+(`index.json` + `blobs/`, guarded by a `.lock` file — a second build on
+the same project fails fast with "another build is running"). Chunk
+stages are sliced, so edits re-run only the affected chunks plus their
+edge neighbours (shared borders need neighbouring normals).
+
+Real runs on the default 2048 m world (release build):
+
+```
+# fresh build (above): 1.326 s, 72 files written
+# no-op rebuild:
+global stages: 0 ran, 5 reused (0.000 s)
+chunks: 0 ran of 64 (64 cached, 0.000 s)
+cache: 69 hits, 0 misses, 0 corrupt, 0 missing, 0 blobs written, 0 deleted
+files written: 0
+total wall time: 0.646 s
+# one shape point moved 15 m:
+global stages: 5 ran, 0 reused (0.657 s)
+chunks: 14 ran of 64 (50 cached, 0.005 s)
+files written: 19
+total wall time: 1.299 s
+# full wipe + rebuild:
+mybuilder build --clean --yes my-world   # deletes cache + listed outputs
+```
+
+The cache is ~186 MB for the default world (mostly the f64 height and
+distance planes) — fine to delete anytime; it is rebuilt on demand.
+
+## Disk usage
+
+`target/` holds all build artifacts and gate projects (several GB;
+`cargo clean` frees it). Each project's `cache/` is safe to delete
+anytime — it is rebuilt on the next build, or use
+`mybuilder build --clean --yes`.
 
 ## License
 

@@ -41,3 +41,5 @@ that never reached a commit.
 | 2026-10-23 | 1 | terrain/region_chunk_1_1_glb | (new) | fc6be58c37899af11f0f8367cd7190e0ed07ac4d82e041086c2d0d1ce4a75a13 | Part B/C: snow_line_m + detail_regions schema fields; manifest gains regions array; new region goldens |
 | 2026-10-23 | 1 | terrain/manifest_region | a9183efa0e70 | aa0b5dfe5a75d0acd12b880bd7105ca3ed01620d9db0f7e71fc012d7052c0989 | S4 review: normalize n_true before blending; fix last-quad clamp in coarse_mesh_normal |
 | 2026-10-23 | 1 | terrain/region_chunk_1_1_glb | fc6be58c3789 | 56ff342613cddb3d735873c4c6f543ac34cb85e75d746f3a20d2a026d8253293 | S4 review: normalize n_true before blending; fix last-quad clamp in coarse_mesh_normal |
+| 2026-10-23 | 1 | geom/chaikin | (new) | 3088edabb49e093e4e286f7a611c0d35d0f221e8a8a9ad6df4f281e57fe0392f | new goldens: shape-tool simplify_dp + chaikin on fixed noisy circle (Phase 2 step 1) |
+| 2026-10-23 | 1 | geom/simplify_dp | (new) | 29b1afbe904a6fc8b6b8921cea02c77d062e88b13febbab979988fb54d90e63a | new goldens: shape-tool simplify_dp + chaikin on fixed noisy circle (Phase 2 step 1) |

@@ -3,6 +3,15 @@
 <body>
 <header>
   <button id="openBtn">Open project…</button>
+  <span id="tools">
+    <button class="tool on" data-t="pan">Pan</button>
+    <button class="tool" data-t="land">Land</button>
+    <button class="tool" data-t="water">Water</button>
+    <button class="tool" data-t="mountain">Mountain</button>
+    <button class="tool" data-t="forest">Forest</button>
+    <button class="tool" data-t="select">Select</button>
+    <button id="delBtn" disabled>Delete</button>
+  </span>
   <span id="projName" class="name">—</span>
   <span id="seed" class="dim"></span>
   <span id="dirty" class="badge hidden">recipe changed — Rebuild to update</span>

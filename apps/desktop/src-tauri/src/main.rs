@@ -180,6 +180,64 @@ fn build(state: tauri::State<Shared>, app: tauri::AppHandle, mode: String) -> Re
 }
 
 #[tauri::command]
+fn add_shape(
+    state: tauri::State<Shared>,
+    kind: String,
+    stroke: Vec<[f64; 2]>,
+    tolerance_m: f64,
+) -> Result<String, String> {
+    let k = match kind.as_str() {
+        "land" => mb_schema::ShapeKind::Land,
+        "water" => mb_schema::ShapeKind::Water,
+        "mountain" => mb_schema::ShapeKind::Mountain,
+        "forest" => mb_schema::ShapeKind::Forest,
+        _ => return Err(format!("bad kind {kind}")),
+    };
+    let mut g = state.inner().lock().map_err(|e| e.to_string())?;
+    let p = g.as_mut().ok_or("no project open")?;
+    if p.building {
+        return Err("a build is running".to_string());
+    }
+    p.session
+        .apply(mb_bridge::RecipeEdit::AddShape {
+            kind: k,
+            stroke,
+            tolerance_m,
+        })
+        .map_err(|e| format!("{e:?}"))?;
+    p.dirty = true;
+    p.session
+        .last_added_id()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "add_shape produced no id".to_string())
+}
+
+#[tauri::command]
+fn remove_shape(state: tauri::State<Shared>, id: String) -> Result<String, String> {
+    apply_edit(&state, mb_bridge::RecipeEdit::RemoveShape { id })
+}
+
+#[tauri::command]
+fn shapes(state: tauri::State<Shared>) -> Result<String, String> {
+    let g = state.inner().lock().map_err(|e| e.to_string())?;
+    let p = g.as_ref().ok_or("no project open")?;
+    let list: Vec<serde_json::Value> = p
+        .session
+        .world()
+        .shapes
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "kind": format!("{:?}", s.kind).to_lowercase(),
+                "points": s.points,
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string(&list).unwrap())
+}
+
+#[tauri::command]
 fn cancel_build(state: tauri::State<Shared>) -> Result<(), String> {
     let g = state.inner().lock().map_err(|e| e.to_string())?;
     let p = g.as_ref().ok_or("no project open")?;
@@ -276,8 +334,12 @@ fn autotest_report(app: tauri::AppHandle, report: String) -> Result<(), String> 
     let v: serde_json::Value = serde_json::from_str(&report).unwrap_or_default();
     let ok = v["status1"] == "ok"
         && v["status2"] == "ok"
+        && v["status3"] == "ok"
         && v["tiles_alpha"].as_i64().unwrap_or(0) > 0
-        && v["can_undo"] == false
+        && v["shapes_after"].as_i64().unwrap_or(0) == 1
+        && v["shapes_after_undo"].as_i64().unwrap_or(-1) == 0
+        && v["unhandled"].as_i64().unwrap_or(9) == 0
+        && v["can_undo"] == true
         && v["can_redo"] == true;
     app.exit(if ok { 0 } else { 1 });
     Ok(())
@@ -304,6 +366,9 @@ fn main() {
             autotest_report,
             autotest_mode,
             js_log,
+            add_shape,
+            remove_shape,
+            shapes,
         ])
         .setup(move |app| {
             if autotest.is_some() {

@@ -371,3 +371,27 @@ fn err_region_blend_band() {
         codes(&validate_project(&project(), &w_region(r2))).contains(&"world.region.blend_band")
     );
 }
+
+#[test]
+fn shape_self_intersection_and_size_limits() {
+    let mut w = WorldRecipe {
+        shapes: vec![Shape {
+            id: "bowtie".into(),
+            kind: ShapeKind::Land,
+            points: vec![[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]],
+        }],
+        ..WorldRecipe::default()
+    };
+    let mut d = Vec::new();
+    validate_world(&w, 1.0, &mut d);
+    assert!(d.iter().any(|x| x.code == "world.shape.self_intersecting"));
+    w.shapes[0].points = (0..4100)
+        .map(|i| [i as f64 % 100.0, i as f64 / 100.0])
+        .collect();
+    let mut d2 = Vec::new();
+    validate_world(&w, 1.0, &mut d2);
+    assert!(
+        d2.iter()
+            .any(|x| x.code == "world.shape.too_many_points" && x.severity == Severity::Error)
+    );
+}

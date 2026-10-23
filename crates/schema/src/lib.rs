@@ -541,7 +541,7 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    fn error(code: &'static str, path: String, message: String) -> Self {
+    pub fn error(code: &'static str, path: String, message: String) -> Self {
         Diagnostic {
             severity: Severity::Error,
             code,
@@ -552,7 +552,7 @@ impl Diagnostic {
         }
     }
 
-    fn warning(code: &'static str, path: String, message: String) -> Self {
+    pub fn warning(code: &'static str, path: String, message: String) -> Self {
         Diagnostic {
             severity: Severity::Warning,
             code,
@@ -911,6 +911,54 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
                     shape.points.len()
                 ),
             ));
+        }
+        if shape.points.len() > 4000 {
+            out.push(Diagnostic::error(
+                "world.shape.too_many_points",
+                format!("{sp}/points"),
+                format!(
+                    "shape {:?} has {} points; the limit is 4000",
+                    shape.id,
+                    shape.points.len()
+                ),
+            ));
+        }
+        // O(n^2) self-intersection check, skipping adjacent segments —
+        // exact f64 orientation is fine for a warning.
+        {
+            let pts = &shape.points;
+            let n = pts.len();
+            if n >= 4 {
+                let o = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| -> f64 {
+                    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+                };
+                let mut hit = false;
+                'segs: for i in 0..n {
+                    let (a1, a2) = (pts[i], pts[(i + 1) % n]);
+                    for j in (i + 2)..n {
+                        // skip the adjacent wrap-around pair (i=0,j=n-1)
+                        if i == 0 && j == n - 1 {
+                            continue;
+                        }
+                        let (b1, b2) = (pts[j], pts[(j + 1) % n]);
+                        let d1 = o(b1, b2, a1);
+                        let d2 = o(b1, b2, a2);
+                        let d3 = o(a1, a2, b1);
+                        let d4 = o(a1, a2, b2);
+                        if ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) {
+                            hit = true;
+                            break 'segs;
+                        }
+                    }
+                }
+                if hit {
+                    out.push(Diagnostic::warning(
+                        "world.shape.self_intersecting",
+                        format!("{sp}/points"),
+                        format!("shape {:?} outline crosses itself", shape.id),
+                    ));
+                }
+            }
         }
         let half_w = width_m / 2.0;
         let half_d = depth_m / 2.0;

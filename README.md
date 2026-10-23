@@ -348,16 +348,20 @@ Run it from that folder: its `.cargo/config.toml` sends build output to the
 root `target/app/`. Using `--manifest-path` from the repo root skips that
 config and creates a second multi-GB `target/` inside `apps/desktop/src-tauri/`.
 
-Controls: Open project… (folder picker), feel dropdown, octaves slider
+Controls: toolbar drawing tools (Pan, Land, Water, Mountain, Forest,
+Select+Delete — freehand strokes are clamped, Douglas–Peucker
+simplified, Chaikin-smoothed and mm-snapped before they are stored in
+the recipe, so shapes are undoable and deterministic), Open project…
+(folder picker), feel dropdown, octaves slider
 with a "use preset" checkbox, Undo/Redo (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z),
 Build (full rebuild), Rebuild (incremental), Clear all & new seed
 (modal with "keep overrides"), Cancel, a tiled hillshade map (drag to
 pan, wheel to zoom z∈[-2,6] at 8·2^-z m/px), and a live log with
 progress and per-stage timings.
 
-Limits today: only feel/octaves are editable (no 2D drawing tools yet),
-the preview is read-only hillshade (no overlays), and the app is
-macOS-verified only.
+Limits today: terrain editing is feel/octaves plus shape draw/remove;
+no edit-by-drag or vertex editing yet, and the app is macOS-verified
+only.
 
 ## Disk usage
 

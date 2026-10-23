@@ -13,6 +13,17 @@ pub enum RecipeEdit {
     /// Some(n) sets the octaves override; None clears it.
     SetOctaves(Option<u32>),
     ReplaceWorld(Box<WorldRecipe>),
+    /// Draw a new shape from a freehand stroke (clamped, DP-simplified,
+    /// Chaikin-smoothed, mm-snapped). Returns the assigned id via the
+    /// apply() result path `Shape { id }`.
+    AddShape {
+        kind: mb_schema::ShapeKind,
+        stroke: Vec<[f64; 2]>,
+        tolerance_m: f64,
+    },
+    RemoveShape {
+        id: String,
+    },
 }
 
 pub enum BridgeError {
@@ -39,6 +50,7 @@ impl From<std::io::Error> for BridgeError {
 }
 
 pub struct Session {
+    last_added_id: Option<String>,
     dir: PathBuf,
     project: ProjectFile,
     world: WorldRecipe,
@@ -50,6 +62,7 @@ impl Session {
     pub fn open(dir: &Path) -> Result<Session, BridgeError> {
         let (project, world, _) = mb_schema::load_project(dir).map_err(BridgeError::Schema)?;
         Ok(Session {
+            last_added_id: None,
             dir: dir.to_path_buf(),
             project,
             world,
@@ -67,6 +80,11 @@ impl Session {
         &self.project
     }
 
+    /// id assigned by the last successful AddShape (None otherwise).
+    pub fn last_added_id(&self) -> Option<&str> {
+        self.last_added_id.as_deref()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -76,12 +94,72 @@ impl Session {
 
     /// Validate + write + record history. A rejected edit changes
     /// neither the file nor the history.
+    /// The id an AddShape edit assigned (apply() returns it through
+    /// this after a successful apply).
     pub fn apply(&mut self, edit: RecipeEdit) -> Result<Vec<Diagnostic>, BridgeError> {
+        self.last_added_id = None;
         let mut candidate = self.world.clone();
         match edit {
             RecipeEdit::SetFeel(f) => candidate.terrain.feel = f,
             RecipeEdit::SetOctaves(o) => candidate.terrain.overrides.octaves = o,
             RecipeEdit::ReplaceWorld(w) => candidate = *w,
+            RecipeEdit::RemoveShape { id } => {
+                candidate.shapes.retain(|s| s.id != id);
+            }
+            RecipeEdit::AddShape {
+                kind,
+                stroke,
+                tolerance_m,
+            } => {
+                let half_w = candidate.extent.width_m / 2.0;
+                let half_d = candidate.extent.depth_m / 2.0;
+                let mut pts: Vec<[f64; 2]> = stroke
+                    .iter()
+                    .map(|&[x, z]| [x.clamp(-half_w, half_w), z.clamp(-half_d, half_d)])
+                    .collect();
+                let closed = true;
+                pts = mb_geom::simplify_dp(&pts, tolerance_m, closed);
+                pts = mb_geom::chaikin(&pts, 2, closed);
+                pts = mb_geom::simplify_dp(&pts, tolerance_m * 0.25, closed);
+                for p in &mut pts {
+                    *p = [
+                        mb_geom::to_meters(mb_geom::snap(p[0])),
+                        mb_geom::to_meters(mb_geom::snap(p[1])),
+                    ];
+                }
+                if pts.len() < 3 {
+                    let mut d = Vec::new();
+                    d.push(mb_schema::Diagnostic::error(
+                        "world.shape.too_few_points",
+                        format!("/shapes/{}/points", candidate.shapes.len()),
+                        format!(
+                            "stroke simplified to {} points; at least 3 are required",
+                            pts.len()
+                        ),
+                    ));
+                    return Ok(d);
+                }
+                let prefix = match kind {
+                    mb_schema::ShapeKind::Land => "land",
+                    mb_schema::ShapeKind::Water => "water",
+                    mb_schema::ShapeKind::Mountain => "mountain",
+                    mb_schema::ShapeKind::Forest => "forest",
+                };
+                let mut n = 1usize;
+                loop {
+                    let id = format!("{prefix}-{n}");
+                    if !candidate.shapes.iter().any(|s| s.id == id) {
+                        self.last_added_id = Some(id.clone());
+                        candidate.shapes.push(mb_schema::Shape {
+                            id,
+                            kind,
+                            points: pts,
+                        });
+                        break;
+                    }
+                    n += 1;
+                }
+            }
         }
         let mut diags = Vec::new();
         mb_schema::validate_world(&candidate, self.project.world_scale.cell_size_m, &mut diags);

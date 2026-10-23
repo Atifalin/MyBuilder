@@ -332,6 +332,29 @@ zoom z -> 8·2^-z m/px, 256-px tiles aligned to the world min corner).
 The cache is ~186 MB for the default world (mostly the f64 height and
 distance planes) — fine to delete anytime; it is rebuilt on demand.
 
+## Control app (desktop)
+
+`apps/desktop/` is a Tauri 2 control app over the mb-bridge API
+(kept out of the root workspace; its own Cargo.lock, output under
+`target/app/`). Run it with plain cargo — no tauri-cli needed, since
+`frontendDist` serves the static `ui/` folder via the `custom-protocol`
+feature:
+
+```sh
+cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+Controls: Open project… (folder picker), feel dropdown, octaves slider
+with a "use preset" checkbox, Undo/Redo (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z),
+Build (full rebuild), Rebuild (incremental), Clear all & new seed
+(modal with "keep overrides"), Cancel, a tiled hillshade map (drag to
+pan, wheel to zoom z∈[-2,6] at 8·2^-z m/px), and a live log with
+progress and per-stage timings.
+
+Limits today: only feel/octaves are editable (no 2D drawing tools yet),
+the preview is read-only hillshade (no overlays), and the app is
+macOS-verified only.
+
 ## Disk usage
 
 `target/` holds all build artifacts and gate projects (several GB;

@@ -1,0 +1,48 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>My Builder</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header>
+  <button id="openBtn">Open project…</button>
+  <span id="projName" class="name">—</span>
+  <span id="seed" class="dim"></span>
+  <span id="dirty" class="badge hidden">recipe changed — Rebuild to update</span>
+</header>
+<main>
+  <aside id="side">
+    <h3>Terrain</h3>
+    <label>Feel
+      <select id="feel"><option>bumpy</option><option>hilly</option><option>mountainous</option></select>
+    </label>
+    <label>Octaves <span id="octVal"></span>
+      <input type="range" id="oct" min="1" max="10" step="1">
+    </label>
+    <label class="row"><input type="checkbox" id="octPreset"> use preset</label>
+    <div class="row">
+      <button id="undoBtn">Undo</button><button id="redoBtn">Redo</button>
+    </div>
+    <h3>Actions</h3>
+    <button id="buildBtn" class="act">Build (full)</button>
+    <button id="rebuildBtn" class="act">Rebuild</button>
+    <button id="clearBtn" class="act warn">Clear all &amp; new seed</button>
+    <button id="cancelBtn" class="act" disabled>Cancel</button>
+  </aside>
+  <section id="center">
+    <canvas id="map"></canvas>
+    <div id="emptyHint">Build to see the preview</div>
+  </section>
+  <section id="logwrap">
+    <div id="progress"><div id="pbar"></div></div>
+    <div id="stageLine" class="dim"></div>
+    <pre id="log"></pre>
+    <button id="clearLog">Clear log</button>
+  </section>
+</main>
+<div id="modal" class="hidden">
+  <div class="box">
+    <p>This deletes generated outputs and the cache, and picks a new seed.</p>
+    <label><input type="checkbox" id="keepOv" checked> Keep manual overrides</label>
+    <div class="row"><button id="mCancel">Cancel</button><button id="mConfirm" class="warn">Confirm</button></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body></html>

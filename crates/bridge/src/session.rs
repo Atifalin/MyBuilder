@@ -62,6 +62,11 @@ impl Session {
         &self.world
     }
 
+    /// The loaded project file (name, seed, generator version).
+    pub fn project(&self) -> &ProjectFile {
+        &self.project
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

@@ -34,6 +34,10 @@ required components.
   previous manifest/layers.json (never anything else); refuses without
   --yes.
 - Bumping `mb_seed::CURRENT_GENERATOR_VERSION` rekeys every stage.
+- Control app: `cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  (Tauri 2, plain-cargo run, assets from `ui/` via custom-protocol;
+  build output in `target/app/`). Headless check:
+  `MB_APP_AUTOTEST=<project> target/app/debug/mb-app`.
 - UI-facing API lives in mb-bridge: `build(dir, req, &CancelToken, sink)`
   emits `BuildEvent`s (`--json-events` prints them as NDJSON; write
   `cancel` to stdin to abort), `Session` for recipe edits with

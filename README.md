@@ -341,8 +341,12 @@ distance planes) — fine to delete anytime; it is rebuilt on demand.
 feature:
 
 ```sh
-cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+cd apps/desktop/src-tauri && cargo run
 ```
+
+Run it from that folder: its `.cargo/config.toml` sends build output to the
+root `target/app/`. Using `--manifest-path` from the repo root skips that
+config and creates a second multi-GB `target/` inside `apps/desktop/src-tauri/`.
 
 Controls: Open project… (folder picker), feel dropdown, octaves slider
 with a "use preset" checkbox, Undo/Redo (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z),

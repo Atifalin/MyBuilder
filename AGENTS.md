@@ -34,7 +34,9 @@ required components.
   previous manifest/layers.json (never anything else); refuses without
   --yes.
 - Bumping `mb_seed::CURRENT_GENERATOR_VERSION` rekeys every stage.
-- Control app: `cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml`
+- Control app: `cd apps/desktop/src-tauri && cargo run` (run from that dir so its
+  `.cargo/config.toml` puts output in the root `target/app`; `--manifest-path` from the
+  repo root ignores it and creates a duplicate multi-GB target dir)
   (Tauri 2, plain-cargo run, assets from `ui/` via custom-protocol;
   build output in `target/app/`). Headless check:
   `MB_APP_AUTOTEST=<project> target/app/debug/mb-app`.

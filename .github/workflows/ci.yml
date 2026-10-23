@@ -28,10 +28,16 @@ jobs:
 
   app-macos:
     runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.0.0
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build

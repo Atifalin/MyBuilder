@@ -18,6 +18,8 @@ const DIR: &str = env!("CARGO_MANIFEST_DIR");
 fn small_project() -> ProjectFile {
     ProjectFile {
         seed: 1,
+        // Existing goldens were made under generator 1 (pre-texturing).
+        generator_version: 1,
         ..ProjectFile::default()
     }
 }
@@ -451,7 +453,7 @@ fn region_border_bit_equal_to_coarse() {
     );
     // Fine chunk (1,1) of the region.
     let fine = mb_terrain::region::region_chunk_mesh(
-        &s.ctx, &s.region, 128, &s.rb, &s.rnorms, 0.0, 300.0, 1, 1,
+        &s.ctx, &s.region, 128, &s.rb, &s.rnorms, 0.0, 300.0, 1, 1, None,
     );
     let fvside = 128 * 2 + 1; // per side at fine mesh_step 1
     let cvside = 128 / 4 + 1;
@@ -625,6 +627,7 @@ fn region_bundle() -> FileBundle {
                 w.profile.snow_line_m,
                 cx as usize,
                 cz as usize,
+                None,
             );
             let id = mb_seed::EntityId::from_path(
                 1,
@@ -717,6 +720,7 @@ fn sliced_region_chunk_matches_full_region() {
             w.profile.snow_line_m,
             cx,
             cz,
+            None,
         );
         let key = format!("{cx}_{cz}");
         let id = mb_seed::EntityId::from_path(
@@ -737,8 +741,17 @@ fn sliced_region_chunk_matches_full_region() {
             cz,
         );
         let rs = mb_terrain::slice::decode_region_slice(&slice);
-        let art =
-            mb_terrain::region_slice::run_region_chunk(&g, &rs, &w, region, 1, cx, cz, &|| false);
+        let art = mb_terrain::region_slice::run_region_chunk(
+            &g,
+            &rs,
+            &w,
+            region,
+            1,
+            cx,
+            cz,
+            &|| false,
+            1,
+        );
         assert_eq!(
             art.bytes[mb_terrain::stages::CHUNK_HEADER..],
             old_glb[..],
@@ -753,7 +766,7 @@ fn sliced_region_chunk_matches_full_region() {
         |i: usize, j: usize| mb_terrain::mesh::node_normal(&h_at, i, j, g.nx - 1, g.nz - 1, g.cell);
     let c_at = |i: usize, j: usize| cdec.coast_at(i, j);
     let new_mesh =
-        mb_terrain::mesh::chunk_mesh_view(&g, h_at, n_at, c_at, 0.0, 300.0, 128, 4, 0, 0);
+        mb_terrain::mesh::chunk_mesh_view(&g, h_at, n_at, c_at, 0.0, 300.0, 128, 4, 0, 0, None);
     let old_mesh = mb_terrain::mesh::chunk_mesh(
         &g,
         &hf,

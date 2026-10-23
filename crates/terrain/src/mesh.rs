@@ -11,6 +11,8 @@ pub struct ChunkMesh {
     pub uvs: Vec<[f32; 2]>,
     /// Linear RGB, f32 VEC3.
     pub colors: Vec<[f32; 3]>,
+    /// Splat UVs for TEXCOORD_1 (gen 2 only; empty on gen 1).
+    pub uv2: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     /// World coords of the chunk's min corner.
     pub origin: [f64; 3],
@@ -18,10 +20,10 @@ pub struct ChunkMesh {
     pub triangle_count: usize,
 }
 
-const SAND: [f32; 3] = [0.87, 0.79, 0.56];
-const GRASS: [f32; 3] = [0.35, 0.55, 0.28];
-const ROCK: [f32; 3] = [0.45, 0.43, 0.40];
-const SNOW: [f32; 3] = [0.92, 0.93, 0.95];
+pub(crate) const SAND: [f32; 3] = [0.87, 0.79, 0.56];
+pub(crate) const GRASS: [f32; 3] = [0.35, 0.55, 0.28];
+pub(crate) const ROCK: [f32; 3] = [0.45, 0.43, 0.40];
+pub(crate) const SNOW: [f32; 3] = [0.92, 0.93, 0.95];
 
 /// Central-difference normal at one node. `h_at` supplies heights by
 /// (i, j); indices are clamped to [i_lo..=i_hi]x[j_lo..=j_hi] exactly the
@@ -46,6 +48,26 @@ pub fn node_normal(
     let (nx, ny, nz) = (-ddx, 1.0, -ddz);
     let inv = 1.0 / (nx * nx + ny * ny + nz * nz).sqrt();
     [(nx * inv) as f32, (ny * inv) as f32, (nz * inv) as f32]
+}
+
+/// Gradient magnitude (tan of slope) at one node from the SAME central
+/// differences as [`node_normal`].
+pub fn node_slope(
+    h_at: &dyn Fn(usize, usize) -> f64,
+    i: usize,
+    j: usize,
+    i_hi: usize,
+    j_hi: usize,
+    cell: f64,
+) -> f64 {
+    let d2 = 2.0 * cell;
+    let hl = h_at(i.saturating_sub(1), j);
+    let hr = h_at((i + 1).min(i_hi), j);
+    let hd = h_at(i, j.saturating_sub(1));
+    let hu = h_at(i, (j + 1).min(j_hi));
+    let ddx = (hr - hl) / d2;
+    let ddz = (hu - hd) / d2;
+    (ddx * ddx + ddz * ddz).sqrt()
 }
 
 /// Full-res per-node normals from central differences on the height
@@ -119,6 +141,7 @@ pub fn chunk_mesh(
         step,
         cx,
         cz,
+        None, // gen-1 helper: no splat UVs
     )
 }
 
@@ -137,6 +160,7 @@ pub fn chunk_mesh_view(
     step: usize,
     cx: usize,
     cz: usize,
+    tex2: Option<(&mb_schema::TexturingSection, usize)>,
 ) -> ChunkMesh {
     let per = cells_per_chunk / step; // cells per chunk side at mesh res
     let vside = per + 1;
@@ -151,10 +175,14 @@ pub fn chunk_mesh_view(
         uvs: Vec::with_capacity(vside * vside),
         colors: Vec::with_capacity(vside * vside),
         indices: Vec::with_capacity(per * per * 6),
+        uv2: Vec::new(),
         origin: [ox, 0.0, oz],
         vertex_count: vside * vside,
         triangle_count: per * per * 2,
     };
+    if let Some((_, _n_texels)) = tex2 {
+        m.uv2 = Vec::with_capacity(vside * vside);
+    }
     for vj in 0..vside {
         for vi in 0..vside {
             let gi = i0 + vi * step;
@@ -166,13 +194,31 @@ pub fn chunk_mesh_view(
                 .push([(x - ox) as f32, h as f32, (z - oz) as f32]);
             m.normals.push(n);
             m.uvs.push([x as f32, z as f32]);
-            m.colors.push(vertex_color(
-                h,
-                coast_at(gi, gj),
-                n[1],
-                sea_level_m,
-                snow_line_m,
-            ));
+            if let Some((tex, n_texels)) = tex2 {
+                // gen 2: weight-blended palette + texel-center splat UVs
+                let g = node_slope(&h_at, gi, gj, grid.nx - 1, grid.nz - 1, grid.cell);
+                let w = crate::splat_weights(h, g, coast_at(gi, gj), sea_level_m, snow_line_m, tex);
+                let pal = [GRASS, SAND, ROCK, SNOW];
+                let mut c = [0.0f32; 3];
+                for k in 0..4 {
+                    c[0] += (w[k] * pal[k][0] as f64) as f32;
+                    c[1] += (w[k] * pal[k][1] as f64) as f32;
+                    c[2] += (w[k] * pal[k][2] as f64) as f32;
+                }
+                m.colors.push(c);
+                m.uv2.push([
+                    ((vi * step) as f64 + 0.5) as f32 / n_texels as f32,
+                    ((vj * step) as f64 + 0.5) as f32 / n_texels as f32,
+                ]);
+            } else {
+                m.colors.push(vertex_color(
+                    h,
+                    coast_at(gi, gj),
+                    n[1],
+                    sea_level_m,
+                    snow_line_m,
+                ));
+            }
         }
     }
     // CCW winding with +Y-facing triangles: (a, c, b) and (b, c, d).

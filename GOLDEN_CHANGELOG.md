@@ -43,3 +43,8 @@ that never reached a commit.
 | 2026-10-23 | 1 | terrain/region_chunk_1_1_glb | fc6be58c3789 | 56ff342613cddb3d735873c4c6f543ac34cb85e75d746f3a20d2a026d8253293 | S4 review: normalize n_true before blending; fix last-quad clamp in coarse_mesh_normal |
 | 2026-10-23 | 1 | geom/chaikin | (new) | 3088edabb49e093e4e286f7a611c0d35d0f221e8a8a9ad6df4f281e57fe0392f | new goldens: shape-tool simplify_dp + chaikin on fixed noisy circle (Phase 2 step 1) |
 | 2026-10-23 | 1 | geom/simplify_dp | (new) | 29b1afbe904a6fc8b6b8921cea02c77d062e88b13febbab979988fb54d90e63a | new goldens: shape-tool simplify_dp + chaikin on fixed noisy circle (Phase 2 step 1) |
+| 2026-10-23 | 2 | schema/canonical_project | dde70d4eb73e | 85e4426bfa80d26af167bc1269dd6261a09e1282f6c115e2740da1522deed32f | generator_version 2 becomes the default for new projects (texturing) |
+| 2026-10-23 | 2 | schema/canonical_world | 1c233b7481c1 | 37bf2c41f19b23fa95fd3f61e2cdf2f308cb01f2ec6a9405d89068588e897ab9 | generator_version 2 becomes the default for new projects (texturing) |
+| 2026-10-23 | 2 | terrain/gen2_chunk_glb | (new) | 74f3b533ae95045d35b0bfd408a9be58064fceb4f70169f57f61a3eb3a6eea0f | generator 2: texturing weights, splat maps, TEXCOORD_1 |
+| 2026-10-23 | 2 | terrain/gen2_splat_png | (new) | be9baf40aebbbfd27b518644959cdb651029c6abbf919741eb6ba2c3645e254f | generator 2: texturing weights, splat maps, TEXCOORD_1 |
+| 2026-10-23 | 2 | terrain/gen2_manifest | (new) | b66bfe1570fd0d5399c6eeab661e2f3c58f69f9862e68db7021f7f5a979bc0e0 | generator 2: texturing weights, splat maps, TEXCOORD_1 |

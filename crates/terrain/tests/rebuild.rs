@@ -758,3 +758,213 @@ fn symlinked_dir_never_deletes_target() {
     assert!(victim.exists(), "target dir must be untouched");
     assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
 }
+
+// ---- 7. Generator 2: texturing ----
+
+fn make_project_gen(dir: &Path, v: u32) {
+    let p = ProjectFile {
+        generator_version: v,
+        ..ProjectFile::default()
+    };
+    let mut w = small_world();
+    w.detail_regions = vec![DetailRegion {
+        id: "r".into(),
+        chunk_min: [1, 1],
+        chunk_max: [1, 1],
+        cell_divisor: 2,
+        mesh_step_cells: 1,
+        extra_octaves: 2,
+        blend_band_m: 16.0,
+    }];
+    std::fs::create_dir_all(dir.join("recipes")).unwrap();
+    std::fs::write(
+        dir.join(mb_schema::PROJECT_FILE),
+        serde_json::to_string_pretty(&p).unwrap() + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("recipes/world.json"),
+        serde_json::to_string_pretty(&w).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn splat_weights_rules() {
+    use mb_terrain::splat_weights;
+    let t = mb_schema::TexturingSection::default();
+    // Steep -> rock dominant.
+    let w = splat_weights(50.0, 5.0, 10.0, 0.0, 80.0, &t);
+    assert!(w[2] > 0.99 && w.iter().sum::<f64>() - 1.0 < 1e-6);
+    // Flat, near coast, low -> sand present.
+    let w = splat_weights(1.0, 0.0, 10.0, 0.0, 80.0, &t);
+    assert!(w[1] > 0.5, "sand at coast: {w:?}");
+    // High flat -> snow; steep -> no snow.
+    let w = splat_weights(120.0, 0.0, 500.0, 0.0, 80.0, &t);
+    assert!(w[3] > 0.9, "snow above line: {w:?}");
+    let w = splat_weights(120.0, 5.0, 500.0, 0.0, 80.0, &t);
+    assert!(w[3] < 0.05 && w[2] > 0.9, "steep: rock not snow: {w:?}");
+    // Underwater -> sand.
+    let w = splat_weights(-5.0, 0.0, 10.0, 0.0, 80.0, &t);
+    assert_eq!(w, [0.0, 1.0, 0.0, 0.0]);
+    // Sum is always 1.
+    for (h, g, c) in [(0.0, 0.0, 0.0), (40.0, 0.5, 30.0), (200.0, 1.0, 500.0)] {
+        let w = splat_weights(h, g, c, 0.0, 80.0, &t);
+        assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-6, "{w:?}");
+    }
+}
+
+#[test]
+fn gen2_outputs_and_height_identical() {
+    let d1 = TestDir(PathBuf::from(format!(
+        "{}/mb_gen1_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let d2 = TestDir(PathBuf::from(format!(
+        "{}/mb_gen2_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d1.0);
+    let _ = std::fs::remove_dir_all(&d2.0);
+    make_project_gen(&d1, 1);
+    make_project_gen(&d2, 2);
+    build(&d1);
+    build(&d2);
+    // height.r16 identical across generators.
+    assert_eq!(
+        std::fs::read(d1.join("layers/height.r16")).unwrap(),
+        std::fs::read(d2.join("layers/height.r16")).unwrap(),
+        "height must be identical gen1/gen2"
+    );
+    // gen-2-only files.
+    assert!(d2.join("layers/splat.png").exists());
+    assert!(d2.join("exports/terrain/splat/chunk_0_0.png").exists());
+    assert!(d2.join("exports/terrain/splat/chunk_1_1.png").exists());
+    assert!(
+        d2.join("exports/terrain/regions/r/splat/chunk_1_1.png")
+            .exists()
+    );
+    assert!(!d1.join("layers/splat.png").exists());
+    assert!(!d1.join("exports/terrain/splat").exists());
+    // manifest: gen2 has splat_channels + per-chunk splat; gen1 doesn't.
+    let m1: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d1.join("exports/terrain/manifest.json")).unwrap())
+            .unwrap();
+    let m2: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d2.join("exports/terrain/manifest.json")).unwrap())
+            .unwrap();
+    assert!(m1["splat_channels"].is_null());
+    assert_eq!(
+        m2["splat_channels"].as_array().unwrap().len(),
+        4,
+        "gen2 channels"
+    );
+    assert!(m1["chunks"][0]["splat"].is_null());
+    assert!(m2["chunks"][0]["splat"]["file"].is_string());
+    // Gen-2 GLB has TEXCOORD_1 in its JSON chunk.
+    let glb = std::fs::read(d2.join("exports/terrain/chunk_0_0.glb")).unwrap();
+    let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+    let attrs = &j["meshes"][0]["primitives"][0]["attributes"];
+    assert!(attrs["TEXCOORD_1"].is_number(), "gen2 TEXCOORD_1");
+    let glb1 = std::fs::read(d1.join("exports/terrain/chunk_0_0.glb")).unwrap();
+    let jl = u32::from_le_bytes(glb1[12..16].try_into().unwrap()) as usize;
+    let j1: serde_json::Value = serde_json::from_slice(&glb1[20..20 + jl]).unwrap();
+    assert!(j1["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].is_null());
+}
+
+#[test]
+fn splat_seam_neighbours_identical() {
+    let d = TestDir(PathBuf::from(format!(
+        "{}/mb_seam_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d.0);
+    make_project_gen(&d, 2);
+    build(&d);
+    let read_png = |p: PathBuf| {
+        let dec = png::Decoder::new(std::io::Cursor::new(std::fs::read(p).unwrap()));
+        let mut r = dec.read_info().unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        r.next_frame(&mut buf).unwrap();
+        (r.info().width as usize, buf)
+    };
+    // chunk (0,0) right edge vs chunk (1,0) left edge, texel-for-texel.
+    let (w, a) = read_png(d.join("exports/terrain/splat/chunk_0_0.png"));
+    let (_, b) = read_png(d.join("exports/terrain/splat/chunk_1_0.png"));
+    for j in 0..w {
+        let ai = (j * w + (w - 1)) * 4;
+        let bi = j * w * 4;
+        assert_eq!(&a[ai..ai + 4], &b[bi..bi + 4], "seam mismatch row {j}");
+    }
+}
+
+#[test]
+fn upgrade_1_to_2_matches_fresh_gen2() {
+    let d = TestDir(PathBuf::from(format!(
+        "{}/mb_upg_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d.0);
+    make_project_gen(&d, 1);
+    build(&d);
+    // upgrade project.json in place
+    let path = d.join("project.json");
+    let mut p: ProjectFile =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    p.generator_version = 2;
+    std::fs::write(&path, serde_json::to_string_pretty(&p).unwrap() + "\n").unwrap();
+    let rep = build(&d);
+    // Every stage re-executed (new keys under gen 2).
+    assert!(
+        rep.run.reused.is_empty(),
+        "upgrade must re-execute all: {:?}",
+        rep.run.reused
+    );
+    let d2 = TestDir(PathBuf::from(format!(
+        "{}/mb_upgf_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d2.0);
+    make_project_gen(&d2, 2);
+    build(&d2);
+    assert_eq!(
+        output_tree_hash(&d),
+        output_tree_hash(&d2),
+        "upgrade output must equal fresh gen-2 build"
+    );
+}
+
+#[test]
+fn gen2_goldens() {
+    // New goldens under generator 2 (texturing weights, splat maps,
+    // TEXCOORD_1); bless changes with the documented reason.
+    let d = TestDir(PathBuf::from(format!(
+        "{}/mb_gg_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d.0);
+    make_project_gen(&d, 2);
+    build(&d);
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen2_chunk_glb",
+        &std::fs::read(d.join("exports/terrain/chunk_0_0.glb")).unwrap(),
+    );
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen2_splat_png",
+        &std::fs::read(d.join("exports/terrain/splat/chunk_0_0.png")).unwrap(),
+    );
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen2_manifest",
+        &std::fs::read(d.join("exports/terrain/manifest.json")).unwrap(),
+    );
+}

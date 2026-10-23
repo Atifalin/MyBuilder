@@ -425,6 +425,7 @@ impl Stage for RegionStage {
             for cz in self.region.chunk_min[1]..=self.region.chunk_max[1] {
                 for cx in self.region.chunk_min[0]..=self.region.chunk_max[0] {
                     let (cx, cz) = (cx as usize, cz as usize);
+                    let tex2: Option<(&mb_schema::TexturingSection, usize)> = None;
                     let mesh = crate::region::region_chunk_mesh(
                         &ctx,
                         &self.region,
@@ -435,6 +436,7 @@ impl Stage for RegionStage {
                         self.world.profile.snow_line_m,
                         cx,
                         cz,
+                        tex2,
                     );
                     let key = format!("{cx}_{cz}");
                     let id = mb_seed::EntityId::from_path(
@@ -448,7 +450,7 @@ impl Stage for RegionStage {
                     let name = format!("chunk_{cx}_{cz}");
                     let glb = crate::glb::chunk_glb(&mesh, &name, &id.to_string(), cx, cz);
                     let rel = format!("exports/terrain/regions/{}/{}.glb", self.region.id, name);
-                    entries.push(serde_json::json!({
+                    let e = serde_json::json!({
                         "id": id.to_string(),
                         "cx": cx,
                         "cz": cz,
@@ -458,7 +460,8 @@ impl Stage for RegionStage {
                         "vertex_count": mesh.vertex_count,
                         "triangle_count": mesh.triangle_count,
                         "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&glb)),
-                    }));
+                    });
+                    entries.push(e);
                     files.push((rel, glb));
                 }
             }
@@ -584,14 +587,47 @@ impl Stage for LayersStage {
     }
     fn run(&self, inputs: &[&Artifact], _seed: u64, _ctx: &RunCtx) -> Result<Artifact, Cancelled> {
         Ok({
-            let (_nx, _nz, h_min, h_max, heights, _coast) = decode_height(&inputs[0].bytes);
+            let (_nx, _nz, h_min, h_max, heights, coast) = decode_height(&inputs[0].bytes);
             let (_g, masks) = decode_masks(&inputs[1].bytes);
             let hf = HeightField {
                 h: heights,
                 h_min,
                 h_max,
             };
-            outputs::build_layers_bundle(&self.grid, &self.world, &hf, &masks).encode()
+            let mut bundle = outputs::build_layers_bundle(&self.grid, &self.world, &hf, &masks);
+            if self.project.generator_version >= 2 {
+                // Whole-world splat at node resolution.
+                let mut rgba = Vec::with_capacity(self.grid.nx * self.grid.nz * 4);
+                for j in 0..self.grid.nz {
+                    for i in 0..self.grid.nx {
+                        let idx = j * self.grid.nx + i;
+                        let g = crate::mesh::node_slope(
+                            &|ii, jj| hf.h[jj * self.grid.nx + ii],
+                            i,
+                            j,
+                            self.grid.nx - 1,
+                            self.grid.nz - 1,
+                            self.grid.cell,
+                        );
+                        let w = crate::splat_weights(
+                            hf.h[idx],
+                            g,
+                            coast[idx],
+                            self.world.sea_level_m,
+                            self.world.profile.snow_line_m,
+                            &self.world.texturing,
+                        );
+                        for x in w {
+                            rgba.push((x * 255.0).round() as u8);
+                        }
+                    }
+                }
+                bundle.files.push((
+                    "layers/splat.png".to_string(),
+                    outputs::rgba_png(&rgba, self.grid.nx as u32, self.grid.nz as u32),
+                ));
+            }
+            bundle.encode()
         })
     }
 }
@@ -682,6 +718,13 @@ impl mb_pipeline::SlicedStage for ChunkStage {
             let normal_at =
                 |i: usize, j: usize| crate::mesh::node_normal(&h_at, i, j, gi_hi, gj_hi, cell);
             let coast_at = |i: usize, j: usize| cs.coast_at(i, j);
+            let gen2 = self.project.generator_version >= 2;
+            let n_texels = cells_per_chunk + 1;
+            let tex2 = if gen2 {
+                Some((&self.world.texturing, n_texels))
+            } else {
+                None
+            };
             let mesh = crate::mesh::chunk_mesh_view(
                 &self.grid,
                 h_at,
@@ -693,6 +736,7 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                 step,
                 self.cx,
                 self.cz,
+                tex2,
             );
             let id = mb_seed::EntityId::from_path(
                 self.project.seed,
@@ -712,6 +756,38 @@ impl mb_pipeline::SlicedStage for ChunkStage {
             out.extend_from_slice(&(mesh.vertex_count as u32).to_le_bytes());
             out.extend_from_slice(&(mesh.triangle_count as u32).to_le_bytes());
             out.extend_from_slice(&glb);
+            if gen2 {
+                // Splat tail: u32 len + RGBA8 PNG at full node res.
+                let mut rgba = Vec::with_capacity(n_texels * n_texels * 4);
+                for j in 0..n_texels {
+                    for i in 0..n_texels {
+                        let gi = self.cx * cells_per_chunk + i;
+                        let gj = self.cz * cells_per_chunk + j;
+                        let g = crate::mesh::node_slope(
+                            &h_at,
+                            gi,
+                            gj,
+                            self.grid.nx - 1,
+                            self.grid.nz - 1,
+                            cell,
+                        );
+                        let w = crate::splat_weights(
+                            cs.h_at(gi, gj),
+                            g,
+                            coast_at(gi, gj),
+                            self.world.sea_level_m,
+                            self.world.profile.snow_line_m,
+                            &self.world.texturing,
+                        );
+                        for x in w {
+                            rgba.push((x * 255.0).round() as u8);
+                        }
+                    }
+                }
+                let png = crate::outputs::rgba_png(&rgba, n_texels as u32, n_texels as u32);
+                out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+                out.extend_from_slice(&png);
+            }
             Artifact::new(out)
         })
     }
@@ -819,6 +895,7 @@ impl mb_pipeline::SlicedStage for RegionChunkStage {
                 self.cx,
                 self.cz,
                 &|| ctx.tick(),
+                self.project.generator_version,
             )
         })
     }
@@ -923,7 +1000,12 @@ impl Stage for ManifestStage {
                     k += 1;
                     let vc = u32::from_le_bytes(a.bytes[0..4].try_into().unwrap()) as usize;
                     let tc = u32::from_le_bytes(a.bytes[4..8].try_into().unwrap()) as usize;
-                    let glb = &a.bytes[CHUNK_HEADER..];
+                    let glb_len = u32::from_le_bytes(
+                        a.bytes[CHUNK_HEADER + 8..CHUNK_HEADER + 12]
+                            .try_into()
+                            .unwrap(),
+                    ) as usize;
+                    let glb = &a.bytes[CHUNK_HEADER..CHUNK_HEADER + glb_len];
                     let id = mb_seed::EntityId::from_path(
                         self.project.seed,
                         &[("world", "main"), ("chunk", &format!("{cx}_{cz}"))],
@@ -942,6 +1024,14 @@ impl Stage for ManifestStage {
                     });
                     if let Some(rid) = superseded.get(&(cx as u32, cz as u32)) {
                         entry["superseded_by"] = serde_json::json!(rid);
+                    }
+                    let tail = &a.bytes[CHUNK_HEADER + glb_len..];
+                    if !tail.is_empty() {
+                        let sl = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+                        entry["splat"] = serde_json::json!({
+                            "file": format!("splat/chunk_{cx}_{cz}.png"),
+                            "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&tail[4..4 + sl])),
+                        });
                     }
                     chunk_entries.push(entry);
                     total_v += vc;
@@ -962,7 +1052,12 @@ impl Stage for ManifestStage {
                         k += 1;
                         let vc = u32::from_le_bytes(a.bytes[0..4].try_into().unwrap()) as usize;
                         let tc = u32::from_le_bytes(a.bytes[4..8].try_into().unwrap()) as usize;
-                        let glb = &a.bytes[CHUNK_HEADER..];
+                        let glb_len = u32::from_le_bytes(
+                            a.bytes[CHUNK_HEADER + 8..CHUNK_HEADER + 12]
+                                .try_into()
+                                .unwrap(),
+                        ) as usize;
+                        let glb = &a.bytes[CHUNK_HEADER..CHUNK_HEADER + glb_len];
                         let (cx, cz) = (cx as usize, cz as usize);
                         let key = format!("{cx}_{cz}");
                         let id = mb_seed::EntityId::from_path(
@@ -971,7 +1066,7 @@ impl Stage for ManifestStage {
                         );
                         let ox = self.grid.x(cx * cells_per_chunk);
                         let oz = self.grid.z(cz * cells_per_chunk);
-                        entries.push(serde_json::json!({
+                        let mut e = serde_json::json!({
                             "id": id.to_string(),
                             "cx": cx,
                             "cz": cz,
@@ -981,7 +1076,16 @@ impl Stage for ManifestStage {
                             "vertex_count": vc,
                             "triangle_count": tc,
                             "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(glb)),
-                        }));
+                        });
+                        let tail = &a.bytes[CHUNK_HEADER + glb_len..];
+                        if !tail.is_empty() {
+                            let sl = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+                            e["splat"] = serde_json::json!({
+                                "file": format!("regions/{}/splat/chunk_{cx}_{cz}.png", r.id),
+                                "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&tail[4..4 + sl])),
+                            });
+                        }
+                        entries.push(e);
                         total_v += vc;
                         total_t += tc;
                     }

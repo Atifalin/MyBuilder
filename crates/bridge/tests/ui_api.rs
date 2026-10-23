@@ -143,10 +143,21 @@ fn event_stream_full_and_incremental() {
         &mb_bridge::CancelToken::new(),
         &mut |e| ev.push(e),
     );
-    assert_eq!(out.status, "ok");
+    assert_eq!(
+        out.status,
+        "ok",
+        "events: {:?}",
+        ev.iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+    );
     // First Started, last Finished{ok}.
     assert!(matches!(ev.first(), Some(BuildEvent::Started { .. })));
-    assert!(matches!(ev.last(), Some(BuildEvent::Finished { status, .. }) if status == "ok"));
+    assert!(
+        matches!(ev.last(), Some(BuildEvent::Finished { status, .. }) if status == "ok"),
+        "last event: {:?}",
+        ev.last()
+    );
     // Every StageStarted has a StageFinished.
     let mut started: Vec<String> = Vec::new();
     let mut finished: std::collections::HashSet<String> = std::collections::HashSet::new();

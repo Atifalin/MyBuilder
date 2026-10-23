@@ -60,13 +60,13 @@ pub fn build(
             };
         }
     };
-    for d in &diags {
-        sink(diag_event(d));
-    }
     if diags
         .iter()
         .any(|d| d.severity == mb_schema::Severity::Error)
     {
+        for d in &diags {
+            sink(diag_event(d));
+        }
         sink(BuildEvent::Finished {
             status: "failed".to_string(),
             error: Some("validation failed".to_string()),
@@ -99,6 +99,9 @@ pub fn build(
         stages_total: 5 + chunks_total,
         chunks_total,
     });
+    for d in &diags {
+        sink(diag_event(d));
+    }
     // Progress accounting: fixed estimated weights (see weight_of).
     let mut total_w = 0u64;
     for _ in 0..ncx * ncz {

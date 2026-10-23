@@ -136,6 +136,9 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                 if let Some(f) = c["file"].as_str() {
                     push(format!("exports/terrain/{f}"), f);
                 }
+                if let Some(f) = c["splat"]["file"].as_str() {
+                    push(format!("exports/terrain/{f}"), f);
+                }
             }
         }
         if let Some(regs) = v["regions"].as_array() {
@@ -143,6 +146,9 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                 if let Some(ch) = r["chunks"].as_array() {
                     for c in ch {
                         if let Some(f) = c["file"].as_str() {
+                            push(format!("exports/terrain/{f}"), f);
+                        }
+                        if let Some(f) = c["splat"]["file"].as_str() {
                             push(format!("exports/terrain/{f}"), f);
                         }
                     }
@@ -294,10 +300,25 @@ fn collect_outputs(
     for cz in 0..ncz {
         for cx in 0..ncx {
             let a = run_artifacts(&chunk_stage_id(cx, cz)).unwrap();
+            // GLB length is in its own header (u32 at offset 8);
+            // anything after it is the gen-2 splat tail.
+            let glb_len = u32::from_le_bytes(
+                a.bytes[CHUNK_HEADER + 8..CHUNK_HEADER + 12]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             files.push((
                 format!("exports/terrain/chunk_{cx}_{cz}.glb"),
-                a.bytes[CHUNK_HEADER..].to_vec(),
+                a.bytes[CHUNK_HEADER..CHUNK_HEADER + glb_len].to_vec(),
             ));
+            let tail = &a.bytes[CHUNK_HEADER + glb_len..];
+            if !tail.is_empty() {
+                let sl = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+                files.push((
+                    format!("exports/terrain/splat/chunk_{cx}_{cz}.png"),
+                    tail[4..4 + sl].to_vec(),
+                ));
+            }
         }
     }
     for r in &world.detail_regions {
@@ -305,10 +326,23 @@ fn collect_outputs(
             for cx in r.chunk_min[0]..=r.chunk_max[0] {
                 let a =
                     run_artifacts(&region_chunk_stage_id(&r.id, cx as usize, cz as usize)).unwrap();
+                let glb_len = u32::from_le_bytes(
+                    a.bytes[CHUNK_HEADER + 8..CHUNK_HEADER + 12]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
                 files.push((
                     format!("exports/terrain/regions/{}/chunk_{cx}_{cz}.glb", r.id),
-                    a.bytes[CHUNK_HEADER..].to_vec(),
+                    a.bytes[CHUNK_HEADER..CHUNK_HEADER + glb_len].to_vec(),
                 ));
+                let tail = &a.bytes[CHUNK_HEADER + glb_len..];
+                if !tail.is_empty() {
+                    let sl = u32::from_le_bytes(tail[0..4].try_into().unwrap()) as usize;
+                    files.push((
+                        format!("exports/terrain/regions/{}/splat/chunk_{cx}_{cz}.png", r.id),
+                        tail[4..4 + sl].to_vec(),
+                    ));
+                }
             }
         }
     }

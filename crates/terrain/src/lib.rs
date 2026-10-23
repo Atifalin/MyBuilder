@@ -500,3 +500,51 @@ pub fn dequantize(q: u16, h_min: f64, h_max: f64) -> f64 {
 pub fn quant_step(h_min: f64, h_max: f64) -> f64 {
     (h_max - h_min) / 65535.0
 }
+
+// ---------------------------------------------------------------------
+// Generator v2: splat texturing.
+
+/// Water proximity for texturing — step 3 (hydrology) will extend this
+/// with river/lake distance; for now it is just the coast distance.
+fn water_dist(coast: f64) -> f64 {
+    coast
+}
+
+/// Splat weights [grass, sand, rock, snow] for one sample, gen-2 rules.
+/// `g` = gradient magnitude (sqrt(dx²+dz²) = tan slope), `h` height,
+/// `sea` sea level, `snow_line` meters above sea, `coast` meters to
+/// coast. Underwater (h < sea) counts as sand. The four weights always
+/// sum to exactly 1 (renormalized within 1e-6).
+pub fn splat_weights(
+    h: f64,
+    g: f64,
+    coast: f64,
+    sea: f64,
+    snow_line: f64,
+    t: &mb_schema::TexturingSection,
+) -> [f64; 4] {
+    if h < sea {
+        return [0.0, 1.0, 0.0, 0.0];
+    }
+    let rock = smoothstep(t.rock_slope_start, t.rock_slope_end, g);
+    let snow_raw = smoothstep(
+        snow_line - t.snow_band_m,
+        snow_line + t.snow_band_m,
+        h - sea,
+    ) * (1.0 - smoothstep(t.snow_max_slope - 0.1, t.snow_max_slope + 0.1, g));
+    let sand_raw = (1.0 - smoothstep(0.0, t.sand_width_m, water_dist(coast)))
+        * (1.0 - smoothstep(t.sand_max_height_m * 0.5, t.sand_max_height_m, h - sea));
+    // rock priority, then snow, then sand; grass gets the rest.
+    let r = 1.0 - rock;
+    let snow = snow_raw * r;
+    let sand = sand_raw * (r - snow).max(0.0);
+    let grass = (1.0 - rock - snow - sand).max(0.0);
+    let mut w = [grass, sand, rock, snow];
+    let sum: f64 = w.iter().sum();
+    if sum > 0.0 && (sum - 1.0).abs() > 1e-9 {
+        for x in &mut w {
+            *x /= sum;
+        }
+    }
+    w
+}

@@ -225,6 +225,18 @@ pub fn build_layers_bundle(
     FileBundle { files }
 }
 
+/// Encode RGBA8 bytes into a PNG.
+pub fn rgba_png(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut wr = enc.write_header().expect("png header");
+    wr.write_image_data(rgba).expect("png data");
+    drop(wr);
+    out
+}
+
 /// manifest.json bytes from assembled chunk/region entries and totals.
 #[allow(clippy::too_many_arguments)]
 pub fn manifest_json(
@@ -238,7 +250,7 @@ pub fn manifest_json(
     total_v: usize,
     total_t: usize,
 ) -> Vec<u8> {
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "schema_version": 1,
         "generator": format!("mybuilder {}", env!("CARGO_PKG_VERSION")),
         "seed": format!("{:016x}", project.seed),
@@ -258,6 +270,9 @@ pub fn manifest_json(
             "triangles": total_t,
         }
     });
+    if project.generator_version >= 2 {
+        manifest["splat_channels"] = serde_json::json!(["grass", "sand", "rock", "snow"]);
+    }
     pretty(&manifest)
 }
 

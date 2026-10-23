@@ -11,7 +11,7 @@
 
 use mb_schema::DetailRegion;
 
-use crate::mesh::vertex_color;
+use crate::mesh::{GRASS, ROCK, SAND, SNOW, vertex_color};
 use crate::{Grid, HeightCtx, HeightField, smoothstep};
 
 /// The fine node grid of a region, INCLUDING a 1-fine-cell apron so
@@ -287,6 +287,7 @@ pub fn region_chunk_mesh(
     snow_line_m: f64,
     cx: usize,
     cz: usize,
+    tex2: Option<(&mb_schema::TexturingSection, usize)>,
 ) -> crate::mesh::ChunkMesh {
     let g = &rb.fine;
     let div = region.cell_divisor as usize;
@@ -311,6 +312,7 @@ pub fn region_chunk_mesh(
         uvs: Vec::with_capacity(vside * vside),
         colors: Vec::with_capacity(vside * vside),
         indices: Vec::with_capacity(per * per * 6),
+        uv2: Vec::new(),
         origin: [ox, 0.0, oz],
         vertex_count: vside * vside,
         triangle_count: per * per * 2,
@@ -326,9 +328,34 @@ pub fn region_chunk_mesh(
                 .push([(x - ox) as f32, h as f32, (z - oz) as f32]);
             m.normals.push(norms[idx]);
             m.uvs.push([x as f32, z as f32]);
-            let d = ctx.coast_at(x, z);
-            m.colors
-                .push(vertex_color(h, d, norms[idx][1], sea_level_m, snow_line_m));
+            if let Some((tex, n_texels)) = tex2 {
+                // gen 2 weights at fine resolution; slope via central
+                // differences on the fine grid.
+                let fstep = ctx.grid.cell / region.cell_divisor as f64;
+                let hi = |fi: usize, fj: usize| rb.h[fj * g.nx + fi.min(g.nx - 1)];
+                let d2 = 2.0 * fstep;
+                let ddx = (hi(fi + 1, fj) - hi(fi.saturating_sub(1), fj)) / d2;
+                let ddz = (hi(fi, fj + 1) - hi(fi, fj.saturating_sub(1))) / d2;
+                let gmag = (ddx * ddx + ddz * ddz).sqrt();
+                let d = ctx.coast_at(x, z);
+                let w = crate::splat_weights(h, gmag, d, sea_level_m, snow_line_m, tex);
+                let pal = [GRASS, SAND, ROCK, SNOW];
+                let mut c = [0.0f32; 3];
+                for k in 0..4 {
+                    c[0] += (w[k] * pal[k][0] as f64) as f32;
+                    c[1] += (w[k] * pal[k][1] as f64) as f32;
+                    c[2] += (w[k] * pal[k][2] as f64) as f32;
+                }
+                m.colors.push(c);
+                m.uv2.push([
+                    ((vi * step) as f64 + 0.5) as f32 / n_texels as f32,
+                    ((vj * step) as f64 + 0.5) as f32 / n_texels as f32,
+                ]);
+            } else {
+                let d = ctx.coast_at(x, z);
+                m.colors
+                    .push(vertex_color(h, d, norms[idx][1], sea_level_m, snow_line_m));
+            }
         }
     }
     for vj in 0..per {

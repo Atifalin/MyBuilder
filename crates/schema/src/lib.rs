@@ -145,6 +145,8 @@ pub struct WorldRecipe {
     #[serde(default)]
     pub profile: TerrainProfile,
     #[serde(default)]
+    pub texturing: TexturingSection,
+    #[serde(default)]
     pub export: ExportSettings,
     /// Higher-detail regions (S4): chunks of the coarse grid resampled
     /// at a finer cell size with extra noise octaves.
@@ -343,6 +345,78 @@ pub enum ShapeKind {
     Forest,
 }
 
+/// Splat/vertex texturing parameters (generator v2; v1 ignores these).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TexturingSection {
+    #[serde(default = "d_rock_start")]
+    pub rock_slope_start: f64,
+    #[serde(default = "d_rock_end")]
+    pub rock_slope_end: f64,
+    #[serde(default = "d_sand_width")]
+    pub sand_width_m: f64,
+    #[serde(default = "d_sand_max_h")]
+    pub sand_max_height_m: f64,
+    #[serde(default = "d_snow_band")]
+    pub snow_band_m: f64,
+    #[serde(default = "d_snow_slope")]
+    pub snow_max_slope: f64,
+}
+fn d_rock_start() -> f64 {
+    0.6
+}
+fn d_rock_end() -> f64 {
+    0.9
+}
+fn d_sand_width() -> f64 {
+    40.0
+}
+fn d_sand_max_h() -> f64 {
+    4.0
+}
+fn d_snow_band() -> f64 {
+    20.0
+}
+fn d_snow_slope() -> f64 {
+    0.8
+}
+impl Default for TexturingSection {
+    fn default() -> Self {
+        Self {
+            rock_slope_start: 0.6,
+            rock_slope_end: 0.9,
+            sand_width_m: 40.0,
+            sand_max_height_m: 4.0,
+            snow_band_m: 20.0,
+            snow_max_slope: 0.8,
+        }
+    }
+}
+fn validate_texturing(t: &TexturingSection, out: &mut Vec<Diagnostic>) {
+    for (path, v, pos) in [
+        ("/texturing/rock_slope_start", t.rock_slope_start, true),
+        ("/texturing/rock_slope_end", t.rock_slope_end, true),
+        ("/texturing/sand_width_m", t.sand_width_m, true),
+        ("/texturing/sand_max_height_m", t.sand_max_height_m, true),
+        ("/texturing/snow_band_m", t.snow_band_m, true),
+        ("/texturing/snow_max_slope", t.snow_max_slope, true),
+    ] {
+        if !v.is_finite() || !pos || v <= 0.0 {
+            out.push(Diagnostic::error(
+                "world.texturing.invalid",
+                path.to_string(),
+                "texturing parameters must be finite and > 0".to_string(),
+            ));
+        }
+    }
+    if t.rock_slope_start >= t.rock_slope_end {
+        out.push(Diagnostic::error(
+            "world.texturing.order",
+            "/texturing".to_string(),
+            "rock_slope_start must be < rock_slope_end".to_string(),
+        ));
+    }
+}
+
 /// A 2D map shape (coast, lake, mountain range, forest zone).
 /// `points` are `[x, z]` pairs in world meters, origin at world center.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -367,6 +441,7 @@ impl Default for WorldRecipe {
             },
             chunk_size_m: 256.0,
             sea_level_m: 0.0,
+            texturing: TexturingSection::default(),
             mode: WorldMode::LandFirst,
             terrain: TerrainSection {
                 feel: TerrainFeel::Hilly,
@@ -980,6 +1055,7 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
             }
         }
     }
+    validate_texturing(&world.texturing, out);
 }
 
 /// Validation for S4 detail regions.

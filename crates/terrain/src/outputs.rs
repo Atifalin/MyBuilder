@@ -270,17 +270,36 @@ fn pretty(v: &serde_json::Value) -> Vec<u8> {
 /// Hillshade preview PNG, one pixel per 2 m, Lambert shading with a
 /// literal normalized light direction (no trig). Water is blue-tinted by
 /// depth; land is a hypsometric tint scaled by shade.
+/// Shared color rule for the hillshade and preview tiles: underwater
+/// blues by depth, terrain gradient by height, scaled by `shade`
+/// (Lambert dot(normal, light)).
+pub fn terrain_color(h: f64, shade: f64, h_min: f64, h_max: f64, sea: f64) -> (u8, u8, u8) {
+    let span = if h_max > h_min { h_max - h_min } else { 1.0 };
+    let (r, g, b) = if h < sea {
+        let depth = ((sea - h) / 40.0).clamp(0.0, 1.0);
+        (
+            0.05 + 0.10 * (1.0 - depth),
+            0.20 + 0.25 * (1.0 - depth),
+            0.45 + 0.30 * (1.0 - depth),
+        )
+    } else {
+        let t = ((h - h_min) / span).clamp(0.0, 1.0);
+        let (r, g, b) = (0.20 + 0.65 * t, 0.40 + 0.45 * t, 0.20 + 0.55 * t);
+        (r * shade, g * shade, b * shade)
+    };
+    (
+        (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
 fn hillshade_png(grid: &Grid, hf: &HeightField, sea: f64) -> Vec<u8> {
     const L: [f64; 3] = [0.5, std::f64::consts::FRAC_1_SQRT_2, 0.5]; // normalized
     let pxw = ((grid.nx - 1) as f64 * grid.cell / 2.0) as usize;
     let pxd = ((grid.nz - 1) as f64 * grid.cell / 2.0) as usize;
     let norms = normals(grid, hf);
     let mut rgb = Vec::with_capacity(pxw * pxd * 3);
-    let span = if hf.h_max > hf.h_min {
-        hf.h_max - hf.h_min
-    } else {
-        1.0
-    };
     for pj in 0..pxd {
         for pi in 0..pxw {
             // Pixel center world coords -> nearest grid node.
@@ -295,21 +314,10 @@ fn hillshade_png(grid: &Grid, hf: &HeightField, sea: f64) -> Vec<u8> {
             let h = hf.h[idx];
             let shade =
                 (n[0] as f64 * L[0] + n[1] as f64 * L[1] + n[2] as f64 * L[2]).clamp(0.0, 1.0);
-            let (r, g, b) = if h < sea {
-                let depth = ((sea - h) / 40.0).clamp(0.0, 1.0);
-                (
-                    0.05 + 0.10 * (1.0 - depth),
-                    0.20 + 0.25 * (1.0 - depth),
-                    0.45 + 0.30 * (1.0 - depth),
-                )
-            } else {
-                let t = ((h - hf.h_min) / span).clamp(0.0, 1.0);
-                let (r, g, b) = (0.20 + 0.65 * t, 0.40 + 0.45 * t, 0.20 + 0.55 * t);
-                (r * shade, g * shade, b * shade)
-            };
-            rgb.push((r.clamp(0.0, 1.0) * 255.0).round() as u8);
-            rgb.push((g.clamp(0.0, 1.0) * 255.0).round() as u8);
-            rgb.push((b.clamp(0.0, 1.0) * 255.0).round() as u8);
+            let (r, g, b) = terrain_color(h, shade, hf.h_min, hf.h_max, sea);
+            rgb.push(r);
+            rgb.push(g);
+            rgb.push(b);
         }
     }
     let mut out = Vec::new();

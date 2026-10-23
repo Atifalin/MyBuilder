@@ -8,6 +8,11 @@ publish.workspace = true
 mb-seed.workspace = true
 mb-geom.workspace = true
 mb-schema.workspace = true
+mb-terrain.workspace = true
+mb-pipeline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 mb-seed = { workspace = true, features = ["golden"] }

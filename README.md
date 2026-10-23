@@ -306,7 +306,28 @@ files written: 19
 total wall time: 1.299 s
 # full wipe + rebuild:
 mybuilder build --clean --yes my-world   # deletes cache + listed outputs
+# machine-readable event stream for UIs:
+mybuilder build --json-events my-world   # NDJSON on stdout, text -> stderr
 ```
+
+`--json-events` emits one `BuildEvent` JSON object per line; the first
+is `started` and the last is `finished`:
+
+```
+{"type":"started","mode":"incremental","stages_total":69,"chunks_total":64}
+{"type":"stage_started","stage":"world.masks","group":"global"}
+{"type":"stage_finished","stage":"world.masks","group":"global","executed":true,"ms":11.587}
+{"type":"finished","status":"ok","error":null,"ms":1340.2}
+```
+
+Write `cancel` to stdin to abort (exit code 2). `--full` recomputes
+everything (cache reads are skipped but still written).
+`mybuilder clear my-world --seed 42 [--drop-overrides] --yes` wipes the
+cache + listed outputs and reseeds without building.
+
+The UI also gets `mb_bridge::Session` (validated recipe edits with
+undo/redo) and `mb_bridge::PreviewSource` (RGBA PNG heightfield tiles;
+zoom z -> 8·2^-z m/px, 256-px tiles aligned to the world min corner).
 
 The cache is ~186 MB for the default world (mostly the f64 height and
 distance planes) — fine to delete anytime; it is rebuilt on demand.

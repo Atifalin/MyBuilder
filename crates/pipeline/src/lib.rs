@@ -79,6 +79,15 @@ impl<'a> RunCtx<'a> {
     }
 }
 
+/// Observer events emitted around stage execution.
+#[derive(Debug, Clone)]
+pub enum PipelineEvent {
+    /// A stage is about to run (or be served from cache).
+    StageStarted(String),
+    /// Stage done: `executed` is false when it was a cache hit.
+    StageFinished { id: String, executed: bool, ms: f64 },
+}
+
 /// A stage output. `hash` is always `blake3(bytes)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Artifact {
@@ -315,6 +324,12 @@ impl DiskCache {
             }
         }
         let _ = Self::write_atomic(&self.dir.join("index.json"), b"{}");
+    }
+
+    /// Mutable stats access for wrapper caches (Full-build mode counts
+    /// forced misses).
+    pub fn stats_mut(&mut self) -> &mut CacheStats {
+        &mut self.stats
     }
 
     /// Fetch the stored artifact for a stage id regardless of key — used
@@ -569,6 +584,16 @@ impl Pipeline {
         cache: &mut dyn CacheStore,
         cancel: &CancelToken,
     ) -> Result<RunReport, PipelineError> {
+        self.run_observed(cache, cancel, &mut |_| {})
+    }
+
+    /// [`run`] with an observer receiving [`PipelineEvent`]s.
+    pub fn run_observed(
+        &self,
+        cache: &mut dyn CacheStore,
+        cancel: &CancelToken,
+        obs: &mut dyn FnMut(PipelineEvent),
+    ) -> Result<RunReport, PipelineError> {
         let order = self.topo_order()?;
         let mut artifacts: BTreeMap<String, Artifact> = BTreeMap::new();
         let mut report = RunReport {
@@ -611,9 +636,15 @@ impl Pipeline {
                 }
             };
             let ih = self.input_hash(stage, &input_bytes, stage_seed);
+            obs(PipelineEvent::StageStarted(id.clone()));
             let artifact = match cache.get(&id, &ih) {
                 Some(cached) => {
                     report.reused.push(id.clone());
+                    obs(PipelineEvent::StageFinished {
+                        id: id.clone(),
+                        executed: false,
+                        ms: 0.0,
+                    });
                     cached
                 }
                 None => {
@@ -631,11 +662,15 @@ impl Pipeline {
                             return Ok(report);
                         }
                     };
-                    report
-                        .durations_us
-                        .insert(id.clone(), t0.elapsed().as_micros() as u64);
+                    let us = t0.elapsed().as_micros() as u64;
+                    report.durations_us.insert(id.clone(), us);
                     cache.put(&id, ih, &a);
                     report.executed.push(id.clone());
+                    obs(PipelineEvent::StageFinished {
+                        id: id.clone(),
+                        executed: true,
+                        ms: us as f64 / 1000.0,
+                    });
                     a
                 }
             };

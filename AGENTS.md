@@ -34,6 +34,11 @@ required components.
   previous manifest/layers.json (never anything else); refuses without
   --yes.
 - Bumping `mb_seed::CURRENT_GENERATOR_VERSION` rekeys every stage.
+- UI-facing API lives in mb-bridge: `build(dir, req, &CancelToken, sink)`
+  emits `BuildEvent`s (`--json-events` prints them as NDJSON; write
+  `cancel` to stdin to abort), `Session` for recipe edits with
+  undo/redo snapshots, `clear_all` for wipe+reseed under the project
+  lock, and `PreviewSource` for map tiles (zoom z -> mpp 8·2^-z).
 
 ## Generator versions
 

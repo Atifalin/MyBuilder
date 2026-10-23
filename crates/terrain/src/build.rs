@@ -14,6 +14,9 @@ use crate::stages::*;
 pub struct BuildOptions {
     /// `mybuilder build --clean --yes`: wipe cache + listed outputs first.
     pub clean: bool,
+    /// `mybuilder build --full`: do not READ the cache (still write it),
+    /// so every stage recomputes.
+    pub full: bool,
     /// Cache location override; None = OS cache dir per project.
     /// Tests must ALWAYS set this — never write to the real user cache.
     pub cache_dir: Option<PathBuf>,
@@ -95,6 +98,28 @@ impl From<std::io::Error> for BuildError {
 
 /// Files referenced by the previous manifest + layers.json on disk
 /// (paths relative to the project dir, as stored).
+/// The file paths the PREVIOUS manifest/layers.json listed, with each
+/// raw entry's textual safety. For callers that need to delete stale
+/// outputs outside a build (clear_all).
+pub fn listed_outputs(dir: &Path) -> Vec<String> {
+    previous_outputs(dir)
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect()
+}
+
+/// Combined confinement + filesystem check used by every delete:
+/// textual confinement under our output roots, no symlink components,
+/// parent inside the project. `rel` may also be an overrides/ path.
+pub fn may_delete(dir: &Path, rel: &str) -> bool {
+    mb_schema::confined_rel_path_is_safe(rel)
+        && (rel.starts_with("exports/terrain/")
+            || rel.starts_with("layers/")
+            || rel.starts_with("previews/")
+            || rel.starts_with("overrides/"))
+        && safe_to_delete(dir, rel)
+}
+
 fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
     let mut out = vec![
         ("exports/terrain/manifest.json".to_string(), true),
@@ -156,6 +181,26 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// project dir. NOTE: this applies to DELETES only — writes still
 /// follow symlinks on purpose (users may symlink exports/ into a Godot
 /// project).
+/// CacheStore wrapper that never returns hits (Full build) while still
+/// forwarding puts/finish to the real cache.
+struct NoReadCache<'a>(&'a mut DiskCache);
+
+impl mb_pipeline::CacheStore for NoReadCache<'_> {
+    fn get(&mut self, _id: &str, _key: &[u8; 32]) -> Option<mb_pipeline::Artifact> {
+        self.0.stats_mut().misses += 1;
+        None
+    }
+    fn put(&mut self, id: &str, key: [u8; 32], a: &mb_pipeline::Artifact) {
+        self.0.put(id, key, a);
+    }
+    fn finish(&mut self, live_ids: &[String]) {
+        self.0.finish(live_ids);
+    }
+    fn stats(&self) -> mb_pipeline::CacheStats {
+        self.0.stats()
+    }
+}
+
 fn safe_to_delete(dir: &Path, rel: &str) -> bool {
     let canon_root = match dir.canonicalize() {
         Ok(c) => c,
@@ -364,6 +409,16 @@ pub fn build_project(
     opts: &BuildOptions,
     cancel: &mb_pipeline::CancelToken,
 ) -> Result<BuildReport, BuildError> {
+    build_project_observed(dir, opts, cancel, &mut |_| {})
+}
+
+/// [`build_project`] with an observer receiving [`mb_pipeline::PipelineEvent`]s.
+pub fn build_project_observed(
+    dir: &Path,
+    opts: &BuildOptions,
+    cancel: &mb_pipeline::CancelToken,
+    obs: &mut dyn FnMut(mb_pipeline::PipelineEvent),
+) -> Result<BuildReport, BuildError> {
     let (project, world, diags) = mb_schema::load_project(dir)?;
     if diags
         .iter()
@@ -386,6 +441,7 @@ pub fn build_project(
             code: "project.cache.legacy_dir",
             path: "cache/".to_string(),
             message: "project-local cache/ is no longer used; safe to delete".to_string(),
+            entity_id: Some("project".to_string()),
             suggestion: None,
         });
     }
@@ -461,7 +517,13 @@ pub fn build_project(
         world.clone(),
         1,
     )));
-    let report = pipe.run(&mut cache, cancel)?;
+    let mut cache_proxy = NoReadCache(&mut cache);
+    let report = if opts.full {
+        // Full mode: reads miss but puts still land in the cache.
+        pipe.run_observed(&mut cache_proxy, cancel, obs)?
+    } else {
+        pipe.run_observed(&mut cache, cancel, obs)?
+    };
     if report.cancelled {
         // No writes on cancel; the cache was already finished inside run.
         return Ok(BuildReport {

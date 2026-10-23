@@ -129,6 +129,7 @@ fn build(dir: &Path) -> BuildReport {
         dir,
         &BuildOptions {
             clean: false,
+            full: false,
             cache_dir: Some(dir.join(".test-cache")),
         },
         &mb_pipeline::CancelToken::new(),
@@ -550,6 +551,7 @@ fn clean_refuses_while_cache_locked() {
         &d,
         &BuildOptions {
             clean: true,
+            full: false,
             cache_dir: Some(d.join(".test-cache")),
         },
         &mb_pipeline::CancelToken::new(),
@@ -622,6 +624,7 @@ fn cancel_before_build_writes_nothing() {
         &d,
         &BuildOptions {
             clean: false,
+            full: false,
             cache_dir: Some(d.join(".test-cache")),
         },
         &tok,

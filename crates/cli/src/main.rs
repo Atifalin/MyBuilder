@@ -55,6 +55,25 @@ enum Command {
         /// Override the cache location (default: OS cache dir).
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Recompute everything (do not read the cache).
+        #[arg(long)]
+        full: bool,
+        /// Emit NDJSON BuildEvents on stdout; human text -> stderr.
+        #[arg(long)]
+        json_events: bool,
+    },
+    /// Wipe generated state (cache + outputs) and reseed.
+    Clear {
+        dir: PathBuf,
+        /// New seed in hex (random if omitted).
+        #[arg(long)]
+        seed: Option<String>,
+        /// Also delete overrides/ files (kept by default).
+        #[arg(long)]
+        drop_overrides: bool,
+        /// Confirm the destructive operation.
+        #[arg(long)]
+        yes: bool,
     },
     /// Print the resolved cache directory for a project.
     CachePath { dir: PathBuf },
@@ -178,11 +197,38 @@ fn cmd_cache_path(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_clear(dir: &Path, seed: Option<String>, drop: bool, yes: bool) -> Result<ExitCode, String> {
+    if !yes {
+        return Err("clear deletes the cache and all listed outputs; pass --yes".to_string());
+    }
+    let seed = match seed {
+        Some(s) => Some(parse_seed(&s)?),
+        None => None,
+    };
+    let rep = mb_bridge::clear_all(
+        dir,
+        &mb_bridge::ClearRequest {
+            new_seed: seed,
+            keep_overrides: !drop,
+            cache_dir: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "cleared {} files; seed is now {:016x}",
+        rep.deleted_files, rep.seed
+    );
+    println!("run `mybuilder build --full` to regenerate");
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_build(
     dir: &Path,
     clean: bool,
     yes: bool,
     cache_dir: Option<PathBuf>,
+    full: bool,
+    json_events: bool,
 ) -> Result<ExitCode, String> {
     if clean && !yes {
         return Err(
@@ -193,9 +239,53 @@ fn cmd_build(
     let t0 = std::time::Instant::now();
     // Env override is read here only — libraries never read env vars.
     let cache_dir = cache_dir.or_else(|| std::env::var_os("MB_CACHE_DIR").map(PathBuf::from));
+    if json_events {
+        let cancel = mb_bridge::CancelToken::new();
+        // stdin reader: the line "cancel" cancels; EOF does nothing.
+        {
+            let c = cancel.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let stdin = std::io::stdin();
+                for line in stdin.lock().lines().map_while(Result::ok) {
+                    if line.trim() == "cancel" {
+                        c.cancel();
+                    }
+                }
+            });
+        }
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        use std::io::Write as _;
+        let mut sink = |e: mb_bridge::BuildEvent| {
+            let _ = writeln!(lock, "{}", serde_json::to_string(&e).unwrap());
+        };
+        let out = mb_bridge::build(
+            dir,
+            &mb_bridge::BuildRequest {
+                mode: if full {
+                    mb_bridge::BuildMode::Full
+                } else {
+                    mb_bridge::BuildMode::Incremental
+                },
+                cache_dir,
+            },
+            &cancel,
+            &mut sink,
+        );
+        return Ok(match out.status {
+            "ok" => ExitCode::SUCCESS,
+            "cancelled" => ExitCode::from(2),
+            _ => ExitCode::FAILURE,
+        });
+    }
     let rep = mb_terrain::build::build_project(
         dir,
-        &mb_terrain::build::BuildOptions { clean, cache_dir },
+        &mb_terrain::build::BuildOptions {
+            clean,
+            full,
+            cache_dir,
+        },
         &mb_pipeline::CancelToken::new(),
     )
     .map_err(|e| e.to_string())?;
@@ -332,7 +422,15 @@ fn main() -> ExitCode {
             clean,
             yes,
             cache_dir,
-        } => cmd_build(&dir, clean, yes, cache_dir),
+            full,
+            json_events,
+        } => cmd_build(&dir, clean, yes, cache_dir, full, json_events),
+        Command::Clear {
+            dir,
+            seed,
+            drop_overrides,
+            yes,
+        } => cmd_clear(&dir, seed, drop_overrides, yes),
         Command::CachePath { dir } => cmd_cache_path(&dir),
         Command::Upgrade { dir } => cmd_upgrade(&dir),
     };

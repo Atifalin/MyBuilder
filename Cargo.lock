@@ -319,8 +319,13 @@ name = "mb-bridge"
 version = "0.1.0"
 dependencies = [
  "mb-geom",
+ "mb-pipeline",
  "mb-schema",
  "mb-seed",
+ "mb-terrain",
+ "png",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

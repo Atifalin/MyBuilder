@@ -532,6 +532,10 @@ pub struct Diagnostic {
     /// JSON pointer into the offending file, e.g. "/shapes/2/points".
     pub path: String,
     pub message: String,
+    /// Structured entity the diagnostic belongs to (shape id, region
+    /// id, "project", "world", chunk id) when one is natural.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
 }
@@ -543,6 +547,7 @@ impl Diagnostic {
             code,
             path,
             message,
+            entity_id: None,
             suggestion: None,
         }
     }
@@ -553,12 +558,19 @@ impl Diagnostic {
             code,
             path,
             message,
+            entity_id: None,
             suggestion: None,
         }
     }
 
     fn with_suggestion(mut self, suggestion: &str) -> Self {
         self.suggestion = Some(suggestion.to_string());
+        self
+    }
+
+    /// Attach a structured entity id (shape/region/chunk/project/world).
+    pub fn with_entity(mut self, id: impl Into<String>) -> Self {
+        self.entity_id = Some(id.into());
         self
     }
 }
@@ -721,7 +733,29 @@ pub fn validate_project(project: &ProjectFile, world: &WorldRecipe) -> Vec<Diagn
         ));
     }
 
+    for d in &mut out {
+        d.entity_id = Some("project".to_string());
+    }
     validate_world(world, project.world_scale.cell_size_m, &mut out);
+    for d in &mut out {
+        if d.entity_id.is_none() {
+            if let Some(rest) = d.path.strip_prefix("/shapes/") {
+                if let Ok(i) = rest.split('/').next().unwrap_or("").parse::<usize>()
+                    && let Some(sh) = world.shapes.get(i)
+                {
+                    d.entity_id = Some(sh.id.clone());
+                }
+            } else if let Some(rest) = d.path.strip_prefix("/detail_regions/") {
+                if let Ok(i) = rest.split('/').next().unwrap_or("").parse::<usize>()
+                    && let Some(r) = world.detail_regions.get(i)
+                {
+                    d.entity_id = Some(r.id.clone());
+                }
+            } else {
+                d.entity_id = Some("world".to_string());
+            }
+        }
+    }
     out
 }
 

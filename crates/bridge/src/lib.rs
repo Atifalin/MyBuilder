@@ -70,3 +70,18 @@ pub fn derive_seed_hex(root_hex: &str, path: &[(&str, &str)]) -> Result<String, 
         .map_err(|e| format!("invalid hex seed {root_hex:?}: {e}"))?;
     Ok(format!("{:016x}", mb_seed::derive_path(root, path)))
 }
+
+// ---------------------------------------------------------------------
+// Step 3: the UI-facing API. Adapters and the app call only this module.
+
+pub mod events;
+pub use events::BuildEvent;
+pub mod build;
+pub use build::{BuildMode, BuildOutcome, BuildRequest, build};
+pub mod session;
+pub use session::{RecipeEdit, Session};
+pub mod clear;
+pub use clear::{ClearReport, ClearRequest, clear_all};
+pub mod preview;
+pub use mb_pipeline::CancelToken;
+pub use preview::{PreviewSource, Rect};

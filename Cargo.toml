@@ -6,10 +6,14 @@ members = [
     "crates/geom",
     "crates/pipeline",
     "crates/cli",
+    "crates/bridge",
+    "adapters/godot",
+    "adapters/blender",
 ]
 
 [workspace.package]
 edition = "2024"
+version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
@@ -17,6 +21,9 @@ mb-seed = { path = "crates/seed" }
 mb-schema = { path = "crates/schema" }
 mb-geom = { path = "crates/geom" }
 mb-pipeline = { path = "crates/pipeline" }
+mb-bridge = { path = "crates/bridge" }
+godot = { version = "0.5.5", features = ["api-4-7"] }
+pyo3 = { version = "0.30.1", features = ["extension-module", "abi3-py311"] }
 blake3 = "1.8.7"
 serde = "1.0.229"
 serde_json = "1.0.154"

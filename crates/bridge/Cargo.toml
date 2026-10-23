@@ -1,0 +1,13 @@
+[package]
+name = "mb-bridge"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mb-seed.workspace = true
+mb-geom.workspace = true
+mb-schema.workspace = true
+
+[dev-dependencies]
+mb-seed = { workspace = true, features = ["golden"] }

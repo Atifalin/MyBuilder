@@ -1,0 +1,18 @@
+[package]
+name = "mb-blender"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mybuilder_core"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[build-dependencies]
+pyo3-build-config = "0.30.1"
+
+[dependencies]
+pyo3.workspace = true
+mb-bridge.workspace = true

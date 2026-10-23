@@ -41,6 +41,8 @@ enum Command {
     Hash { dir: PathBuf },
     /// Print resolved terrain parameters and the chunk grid.
     Info { dir: PathBuf },
+    /// Print the version and determinism probe hash.
+    Probe,
 }
 
 fn gen_seed() -> u64 {
@@ -153,6 +155,12 @@ fn cmd_info(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_probe() -> ExitCode {
+    println!("version {}", mb_bridge::version());
+    println!("probe {}", mb_bridge::probe());
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -160,6 +168,7 @@ fn main() -> ExitCode {
         Command::Validate { dir, json } => cmd_validate(&dir, json),
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),
+        Command::Probe => Ok(cmd_probe()),
     };
     match result {
         Ok(code) => code,

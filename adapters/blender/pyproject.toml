@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mybuilder_core"
+version = "0.1.0"
+description = "My Builder deterministic procedural core, exposed to Blender Python"
+requires-python = ">=3.11"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "mybuilder_core"
+manifest-path = "Cargo.toml"

@@ -1,1 +1,5 @@
 target/
+*.whl
+__pycache__/
+adapters/godot/demo/bin/
+adapters/godot/demo/.godot/

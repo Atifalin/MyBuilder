@@ -45,6 +45,8 @@ enum Command {
     Probe,
     /// Validate, run the terrain pipeline and write outputs.
     Build { dir: PathBuf },
+    /// Set generator_version to the current one.
+    Upgrade { dir: PathBuf },
 }
 
 fn gen_seed() -> u64 {
@@ -173,6 +175,7 @@ fn cmd_build(dir: &Path) -> Result<ExitCode, String> {
         shapes: world.shapes.clone(),
         cell_size_m: cell,
         extent: world.extent,
+        generator_version: project.generator_version,
     }));
     pipe.add(Box::new(mb_terrain::stages::DistanceStage::new(
         grid, cell, 1,
@@ -183,6 +186,15 @@ fn cmd_build(dir: &Path) -> Result<ExitCode, String> {
         world.clone(),
         1,
     )));
+    for region in world.detail_regions.clone() {
+        pipe.add(Box::new(mb_terrain::stages::RegionStage::new(
+            grid,
+            project.clone(),
+            world.clone(),
+            region,
+            1,
+        )));
+    }
     pipe.add(Box::new(mb_terrain::stages::ExportStage::new(
         grid, project, world, 1,
     )));
@@ -228,6 +240,30 @@ fn cmd_build(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_upgrade(dir: &Path) -> Result<ExitCode, String> {
+    let path = dir.join(mb_schema::PROJECT_FILE);
+    let mut project: mb_schema::ProjectFile =
+        serde_json::from_value(mb_schema::load_json_file(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let old = project.generator_version;
+    if old > mb_schema::CURRENT_GENERATOR_VERSION {
+        return Err("project needs a newer My Builder".to_string());
+    }
+    if old < mb_schema::MIN_SUPPORTED_GENERATOR_VERSION {
+        return Err(format!("generator {old} is too old to upgrade"));
+    }
+    project.generator_version = mb_schema::CURRENT_GENERATOR_VERSION;
+    let mut text = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
+    text.push('\n');
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    println!(
+        "generator_version {old} -> {}",
+        mb_schema::CURRENT_GENERATOR_VERSION
+    );
+    println!("the next `mybuilder build` regenerates outputs; exported files are untouched now");
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_probe() -> ExitCode {
     println!("version {}", mb_bridge::version());
     println!("probe {}", mb_bridge::probe());
@@ -243,6 +279,7 @@ fn main() -> ExitCode {
         Command::Info { dir } => cmd_info(&dir),
         Command::Probe => Ok(cmd_probe()),
         Command::Build { dir } => cmd_build(&dir),
+        Command::Upgrade { dir } => cmd_upgrade(&dir),
     };
     match result {
         Ok(code) => code,

@@ -50,11 +50,12 @@ pub fn normals(grid: &Grid, hf: &HeightField) -> Vec<[f32; 3]> {
 
 /// Vertex color rules. Priority: rock (steep) > snow (high) >
 /// sand/grass blend (coastal sand fades over ~8 m of altitude).
-fn vertex_color(h: f64, d: f64, ny: f32, sea: f64, h_max: f64) -> [f32; 3] {
+pub(crate) fn vertex_color(h: f64, d: f64, ny: f32, sea: f64, snow_line_m: f64) -> [f32; 3] {
     if ny < 0.8 {
         return ROCK;
     }
-    if h > sea + 0.75 * (h_max - sea) {
+    // Absolute snow line: local data only, no global h_max.
+    if h > sea + snow_line_m {
         return SNOW;
     }
     let sand_w = if d < 60.0 {
@@ -83,6 +84,7 @@ pub fn chunk_mesh(
     normals_full: &[[f32; 3]],
     coast: &[f64],
     sea_level_m: f64,
+    snow_line_m: f64,
     cells_per_chunk: usize,
     step: usize,
     cx: usize,
@@ -121,7 +123,7 @@ pub fn chunk_mesh(
                 coast[idx],
                 normals_full[idx][1],
                 sea_level_m,
-                hf.h_max,
+                snow_line_m,
             ));
         }
     }

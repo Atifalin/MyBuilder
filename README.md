@@ -85,6 +85,7 @@ my-world/
   "schema_version": 1,
   "name": "My World",
   "seed": "0000000000000001",
+  "generator_version": 1,
   "units": "meters",
   "up_axis": "y",
   "handedness": "right",
@@ -117,11 +118,13 @@ my-world/
     "inland_width_m": 400.0,
     "mountain_height_m": 600.0,
     "mountain_falloff_m": 250.0,
-    "feature_size_m": 512.0
+    "feature_size_m": 512.0,
+    "snow_line_m": 300.0
   },
   "export": {
     "mesh_step_cells": 4
   },
+  "detail_regions": [],
   "shapes": [
     {
       "id": "coast-1",

@@ -135,12 +135,54 @@ pub fn ridged_fbm(p: &Perlin, x: f64, z: f64, params: &FbmParams) -> f64 {
 /// offset by `i * (37.719, -91.137)` lattice units after scaling. All
 /// constants are literals; no trig, so output stays deterministic.
 fn sum_octaves(p: &Perlin, x: f64, z: f64, params: &FbmParams, ridged_mode: bool) -> f64 {
+    let (sum, norm) = octave_loop(p, x, z, params, 0, params.octaves, ridged_mode);
+    if norm == 0.0 { 0.0 } else { sum / norm }
+}
+
+/// Unnormalized octave sum `Σ_{i=start}^{end-1} g^i · n_i(p)` using the
+/// SAME rotation/offset scheme as [`fbm`], so octave i here is identical
+/// to octave i there. Used to extend the series with extra octaves in
+/// high-detail regions.
+pub fn fbm_octave_sum(p: &Perlin, x: f64, z: f64, params: &FbmParams, start: u32, end: u32) -> f64 {
+    octave_loop(p, x, z, params, start, end, false).0
+}
+
+/// Normalization Σ_{i=0}^{count-1} g^i of the base octave series.
+pub fn fbm_norm(params: &FbmParams, count: u32) -> f64 {
+    let mut norm = 0.0;
+    let mut amp = 1.0;
+    for _ in 0..count {
+        norm += amp;
+        amp *= params.gain;
+    }
+    norm
+}
+
+/// Shared loop over octaves start..end. Returns (sum, norm) where norm =
+/// Σ gain^i over the SAME range. Rotation is cumulative from octave 0, so
+/// starting mid-series still lands each octave on its canonical lattice.
+fn octave_loop(
+    p: &Perlin,
+    x: f64,
+    z: f64,
+    params: &FbmParams,
+    start: u32,
+    end: u32,
+    ridged_mode: bool,
+) -> (f64, f64) {
     let mut amp = 1.0;
     let mut freq = params.frequency;
+    let (mut rx, mut rz) = (x, z);
+    for _ in 0..start {
+        amp *= params.gain;
+        freq *= params.lacunarity;
+        let next_rx = 0.6 * rx - 0.8 * rz;
+        rz = 0.8 * rx + 0.6 * rz;
+        rx = next_rx;
+    }
     let mut sum = 0.0;
     let mut norm = 0.0;
-    let (mut rx, mut rz) = (x, z);
-    for i in 0..params.octaves {
+    for i in start..end {
         let n = p.noise(rx * freq + i as f64 * 37.719, rz * freq - i as f64 * 91.137);
         sum += amp * if ridged_mode { ridged(n) } else { n };
         norm += amp;
@@ -150,7 +192,7 @@ fn sum_octaves(p: &Perlin, x: f64, z: f64, params: &FbmParams, ridged_mode: bool
         rz = 0.8 * rx + 0.6 * rz;
         rx = next_rx;
     }
-    if norm == 0.0 { 0.0 } else { sum / norm }
+    (sum, norm)
 }
 
 /// Ridged transform of a noise sample: `(1 - |n|)^2`, in [0, 1].

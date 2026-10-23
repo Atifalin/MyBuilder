@@ -10,6 +10,7 @@
 pub mod glb;
 pub mod mesh;
 pub mod outputs;
+pub mod region;
 pub mod stages;
 
 /// Grid geometry shared by all stages.
@@ -281,6 +282,114 @@ pub fn build_distances(grid: &Grid, masks: &Masks) -> Distances {
     Distances { coast, mountain }
 }
 
+/// Bilinear interpolation of a node grid at world point (x, z).
+/// Bit-exact at nodes: written as `a + t*(b - a)`, so t = 0 returns `a`.
+pub fn bilinear(grid: &Grid, plane: &[f64], x: f64, z: f64) -> f64 {
+    let fx = ((x - grid.origin_x) / grid.cell).clamp(0.0, (grid.nx - 1) as f64);
+    let fz = ((z - grid.origin_z) / grid.cell).clamp(0.0, (grid.nz - 1) as f64);
+    let i = (fx.floor() as usize).min(grid.nx - 2);
+    let j = (fz.floor() as usize).min(grid.nz - 2);
+    let tx = fx - i as f64;
+    let tz = fz - j as f64;
+    let n = grid.nx;
+    let a = plane[j * n + i];
+    let b = plane[j * n + i + 1];
+    let c = plane[(j + 1) * n + i];
+    let d = plane[(j + 1) * n + i + 1];
+    let top = a + tx * (b - a);
+    let bot = c + tx * (d - c);
+    top + tz * (bot - top)
+}
+
+/// World-function terrain height context: the coarse grid exists only to
+/// supply the two distance planes; every other input is evaluated at the
+/// world point directly, so `height_at` is defined at ANY (x, z) — the
+/// coarse grid is this function sampled at nodes, and fine regions sample
+/// it more densely. This is the S4 invariant.
+pub struct HeightCtx {
+    pub grid: Grid,
+    pub coast: Vec<f64>,
+    pub mountain: Vec<f64>,
+    pub sea_level_m: f64,
+    pub terrain: mb_schema::TerrainParams,
+    pub profile: mb_schema::TerrainProfile,
+    pub perlin_f: mb_geom::Perlin,
+    pub perlin_r: mb_geom::Perlin,
+    pub fbm_params: mb_geom::FbmParams,
+}
+
+impl HeightCtx {
+    pub fn new(
+        grid: Grid,
+        dist: &Distances,
+        sea_level_m: f64,
+        project_seed: u64,
+        terrain: mb_schema::TerrainParams,
+        profile: mb_schema::TerrainProfile,
+    ) -> Self {
+        let fbm_seed = mb_seed::derive(project_seed, "terrain", "fbm");
+        let ridged_seed = mb_seed::derive(project_seed, "terrain", "ridged");
+        HeightCtx {
+            grid,
+            coast: dist.coast.clone(),
+            mountain: dist.mountain.clone(),
+            sea_level_m,
+            terrain,
+            profile,
+            perlin_f: mb_geom::Perlin::new(fbm_seed),
+            perlin_r: mb_geom::Perlin::new(ridged_seed),
+            fbm_params: mb_geom::FbmParams {
+                octaves: terrain.octaves,
+                lacunarity: terrain.lacunarity,
+                gain: terrain.gain,
+                frequency: 1.0 / profile.feature_size_m,
+            },
+        }
+    }
+
+    /// Noise amplitude factor: 0 in the sea and at the coast.
+    pub fn amplitude(&self, d: f64) -> f64 {
+        if d >= 0.0 {
+            smoothstep(0.0, self.profile.inland_width_m, d)
+        } else {
+            0.0
+        }
+    }
+
+    /// Terrain height at any world point. Coast/mountain distance come
+    /// from bilinear interpolation of the coarse planes (bit-exact at
+    /// nodes); noise is evaluated directly at (x, z).
+    pub fn height_at(&self, x: f64, z: f64) -> f64 {
+        let p = &self.profile;
+        let t = &self.terrain;
+        let d = bilinear(&self.grid, &self.coast, x, z);
+        let m_dist = bilinear(&self.grid, &self.mountain, x, z);
+        let base = if d < 0.0 {
+            -p.shelf_depth_m * smoothstep(0.0, p.shelf_width_m, -d)
+        } else {
+            p.coast_height_m
+                + (p.inland_height_m - p.coast_height_m) * smoothstep(0.0, p.inland_width_m, d)
+        };
+        let a = self.amplitude(d);
+        let m = smoothstep(0.0, p.mountain_falloff_m, m_dist);
+        let n = (1.0 - t.ridged_mix) * mb_geom::fbm(&self.perlin_f, x, z, &self.fbm_params)
+            + t.ridged_mix
+                * (2.0 * mb_geom::ridged_fbm(&self.perlin_r, x, z, &self.fbm_params) - 1.0);
+        self.sea_level_m
+            + base
+            + t.relief_m * a * n
+            + p.mountain_height_m
+                * m
+                * a
+                * mb_geom::ridged_fbm(&self.perlin_r, x, z, &self.fbm_params)
+    }
+
+    /// Coast distance at any world point (bilinear; for vertex colors).
+    pub fn coast_at(&self, x: f64, z: f64) -> f64 {
+        bilinear(&self.grid, &self.coast, x, z)
+    }
+}
+
 /// Everything the height stage needs, resolved once.
 pub struct HeightInputs<'a> {
     pub grid: &'a Grid,
@@ -301,47 +410,21 @@ pub struct HeightField {
 
 pub fn build_height(inp: &HeightInputs) -> HeightField {
     let g = inp.grid;
-    let p = inp.profile;
-    let t = &inp.terrain;
-    let fbm_seed = mb_seed::derive(inp.project_seed, "terrain", "fbm");
-    let ridged_seed = mb_seed::derive(inp.project_seed, "terrain", "ridged");
-    let perlin_f = mb_geom::Perlin::new(fbm_seed);
-    let perlin_r = mb_geom::Perlin::new(ridged_seed);
-    let params = mb_geom::FbmParams {
-        octaves: t.octaves,
-        lacunarity: t.lacunarity,
-        gain: t.gain,
-        frequency: 1.0 / p.feature_size_m,
-    };
-
+    let terrain = inp.terrain;
+    let ctx = HeightCtx::new(
+        *g,
+        inp.dist,
+        inp.sea_level_m,
+        inp.project_seed,
+        terrain,
+        *inp.profile,
+    );
+    // The coarse grid is just height_at sampled at nodes. Node coords
+    // come from the shared formula origin + i*spacing everywhere.
     let mut h = vec![0.0; g.len()];
     for j in 0..g.nz {
         for i in 0..g.nx {
-            let idx = j * g.nx + i;
-            let (x, z) = (g.x(i), g.z(j));
-            let d = inp.dist.coast[idx];
-            // Base profile (algorithms 3.4): seabed slopes from 0 at the
-            // coast to -shelf_depth at shelf_width offshore; inland rises
-            // from coast_h to inland_h over inland_width.
-            let base = if d < 0.0 {
-                -p.shelf_depth_m * smoothstep(0.0, p.shelf_width_m, -d)
-            } else {
-                p.coast_height_m
-                    + (p.inland_height_m - p.coast_height_m) * smoothstep(0.0, p.inland_width_m, d)
-            };
-            // Noise amplitude factor: 0 in the sea and at the coast.
-            let a = if d >= 0.0 {
-                smoothstep(0.0, p.inland_width_m, d)
-            } else {
-                0.0
-            };
-            let m = smoothstep(0.0, p.mountain_falloff_m, inp.dist.mountain[idx]);
-            let n = (1.0 - t.ridged_mix) * mb_geom::fbm(&perlin_f, x, z, &params)
-                + t.ridged_mix * (2.0 * mb_geom::ridged_fbm(&perlin_r, x, z, &params) - 1.0);
-            h[idx] = inp.sea_level_m
-                + base
-                + t.relief_m * a * n
-                + p.mountain_height_m * m * a * mb_geom::ridged_fbm(&perlin_r, x, z, &params);
+            h[j * g.nx + i] = ctx.height_at(g.x(i), g.z(j));
         }
     }
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);

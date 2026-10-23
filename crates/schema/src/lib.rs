@@ -17,6 +17,16 @@ use serde::{Deserialize, Serialize};
 /// Highest `schema_version` this build understands.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+/// Generator versions live in mb-seed (the golden-changelog helper needs
+/// them, and mb-seed is the dependency root); re-exported here.
+pub use mb_seed::{CURRENT_GENERATOR_VERSION, MIN_SUPPORTED_GENERATOR_VERSION};
+
+fn default_generator_version() -> u32 {
+    // Literal 1, NOT CURRENT: a project without the field was written by
+    // generator 1 and must never be silently upgraded.
+    1
+}
+
 /// Deterministic canonical hash: BLAKE3 of the compact serde_json bytes of
 /// a typed value. Because we serialize typed structs (never maps), field
 /// order is fixed by the struct definitions and identical across
@@ -39,6 +49,9 @@ pub struct ProjectFile {
     /// Project seed, serialized as a 16-char lowercase hex string.
     #[serde(with = "mb_seed::serde_hex")]
     pub seed: u64,
+    /// Generator algorithm set this project was created/built with.
+    #[serde(default = "default_generator_version")]
+    pub generator_version: u32,
     pub units: Units,
     pub up_axis: UpAxis,
     pub handedness: Handedness,
@@ -86,6 +99,7 @@ impl Default for ProjectFile {
             schema_version: CURRENT_SCHEMA_VERSION,
             name: "My World".to_string(),
             seed: 0,
+            generator_version: CURRENT_GENERATOR_VERSION,
             units: Units::Meters,
             up_axis: UpAxis::Y,
             handedness: Handedness::Right,
@@ -132,6 +146,10 @@ pub struct WorldRecipe {
     pub profile: TerrainProfile,
     #[serde(default)]
     pub export: ExportSettings,
+    /// Higher-detail regions (S4): chunks of the coarse grid resampled
+    /// at a finer cell size with extra noise octaves.
+    #[serde(default)]
+    pub detail_regions: Vec<DetailRegion>,
     pub shapes: Vec<Shape>,
 }
 
@@ -169,6 +187,11 @@ pub struct TerrainProfile {
     pub mountain_falloff_m: f64,
     /// Base noise wavelength in meters; noise frequency = 1 / feature_size.
     pub feature_size_m: f64,
+    /// Snow line: heights above sea_level + snow_line get the snow color.
+    /// Absolute, NOT relative to h_max (which is global and would break
+    /// per-chunk invalidation).
+    #[serde(default = "default_snow_line")]
+    pub snow_line_m: f64,
 }
 
 impl Default for TerrainProfile {
@@ -182,8 +205,13 @@ impl Default for TerrainProfile {
             mountain_height_m: 600.0,
             mountain_falloff_m: 250.0,
             feature_size_m: 512.0,
+            snow_line_m: default_snow_line(),
         }
     }
+}
+
+fn default_snow_line() -> f64 {
+    300.0
 }
 
 /// Export-time settings (affect mesh files, not layer data).
@@ -287,6 +315,25 @@ impl TerrainFeel {
     }
 }
 
+/// A rectangular range of coarse chunks re-exported at higher detail.
+/// Chunk indices are inclusive; `chunk_min`/`chunk_max` are [cx, cz].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailRegion {
+    pub id: String,
+    pub chunk_min: [u32; 2],
+    pub chunk_max: [u32; 2],
+    /// Power-of-two fine divisor of the grid cell (1..=16).
+    pub cell_divisor: u32,
+    /// Vertex stride of fine meshes, in FINE cells.
+    pub mesh_step_cells: u32,
+    /// Extra fBm octaves beyond the base octave count (<= 6).
+    pub extra_octaves: u32,
+    /// Width of the border band over which fine height blends onto the
+    /// coarse mesh surface; must be <= half the region's smaller side.
+    pub blend_band_m: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapeKind {
@@ -327,6 +374,7 @@ impl Default for WorldRecipe {
             },
             profile: TerrainProfile::default(),
             export: ExportSettings::default(),
+            detail_regions: Vec::new(),
             shapes: vec![Shape {
                 id: "coast-1".to_string(),
                 kind: ShapeKind::Land,
@@ -607,6 +655,43 @@ pub fn validate_project(project: &ProjectFile, world: &WorldRecipe) -> Vec<Diagn
             .with_suggestion("use a relative path inside the project, e.g. recipes/world.json"),
         );
     }
+    if project.generator_version > CURRENT_GENERATOR_VERSION {
+        out.push(
+            Diagnostic::error(
+                "project.generator_version.newer",
+                "/generator_version".to_string(),
+                format!(
+                    "project needs generator {}; this build supports up to {}",
+                    project.generator_version, CURRENT_GENERATOR_VERSION
+                ),
+            )
+            .with_suggestion("project needs a newer My Builder"),
+        );
+    } else if project.generator_version < MIN_SUPPORTED_GENERATOR_VERSION {
+        out.push(
+            Diagnostic::error(
+                "project.generator_version.too_old",
+                "/generator_version".to_string(),
+                format!(
+                    "generator {} is older than the minimum supported {}",
+                    project.generator_version, MIN_SUPPORTED_GENERATOR_VERSION
+                ),
+            )
+            .with_suggestion("run `mybuilder upgrade`"),
+        );
+    } else if project.generator_version < CURRENT_GENERATOR_VERSION {
+        out.push(
+            Diagnostic::warning(
+                "project.generator_version.upgrade_available",
+                "/generator_version".to_string(),
+                format!(
+                    "project uses generator {}; {} is available and will change output",
+                    project.generator_version, CURRENT_GENERATOR_VERSION
+                ),
+            )
+            .with_suggestion("run `mybuilder upgrade` to regenerate with current algorithms"),
+        );
+    }
     if project.name.is_empty() {
         out.push(Diagnostic::warning(
             "project.name.empty",
@@ -708,6 +793,7 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
         ("coast_height_m", prof.coast_height_m),
         ("inland_height_m", prof.inland_height_m),
         ("mountain_height_m", prof.mountain_height_m),
+        ("snow_line_m", prof.snow_line_m),
     ] {
         if !v.is_finite() {
             out.push(Diagnostic::error(
@@ -738,6 +824,8 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
             );
         }
     }
+
+    validate_regions(world, cell_size_m, out);
 
     let mut seen_ids = BTreeSet::new();
     for (i, shape) in world.shapes.iter().enumerate() {
@@ -787,6 +875,123 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
                     format!("shape {:?} has points outside the world extent", shape.id),
                 ));
             }
+        }
+    }
+}
+
+/// Validation for S4 detail regions.
+fn validate_regions(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagnostic>) {
+    let ncx = if world.chunk_size_m > 0.0 && world.extent.width_m.is_finite() {
+        (world.extent.width_m / world.chunk_size_m) as i64
+    } else {
+        0
+    };
+    let ncz = if world.chunk_size_m > 0.0 && world.extent.depth_m.is_finite() {
+        (world.extent.depth_m / world.chunk_size_m) as i64
+    } else {
+        0
+    };
+    let mut seen = BTreeSet::new();
+    let mut covered: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for (i, r) in world.detail_regions.iter().enumerate() {
+        let rp = format!("/detail_regions/{i}");
+        if r.id.is_empty() {
+            out.push(Diagnostic::error(
+                "world.region.empty_id",
+                format!("{rp}/id"),
+                "region id is empty".to_string(),
+            ));
+        } else if !seen.insert(r.id.clone()) {
+            out.push(Diagnostic::error(
+                "world.region.duplicate_id",
+                format!("{rp}/id"),
+                format!("duplicate region id {:?}", r.id),
+            ));
+        }
+        let [x0, z0] = r.chunk_min;
+        let [x1, z1] = r.chunk_max;
+        if x0 > x1 || z0 > z1 {
+            out.push(Diagnostic::error(
+                "world.region.chunk_range",
+                rp.clone(),
+                format!(
+                    "region {:?} has chunk_min {:?} > chunk_max {:?}",
+                    r.id, r.chunk_min, r.chunk_max
+                ),
+            ));
+        } else if ncx > 0 && (x1 as i64 >= ncx || z1 as i64 >= ncz) {
+            out.push(Diagnostic::error(
+                "world.region.chunk_range",
+                rp.clone(),
+                format!(
+                    "region {:?} covers chunks up to {:?} but the grid is {ncx}x{ncz}",
+                    r.id, r.chunk_max
+                ),
+            ));
+        }
+        for cx in x0..=x1 {
+            for cz in z0..=z1 {
+                if !covered.insert((cx, cz)) {
+                    out.push(Diagnostic::error(
+                        "world.region.overlap",
+                        rp.clone(),
+                        format!(
+                            "region {:?} overlaps another region at chunk ({cx}, {cz})",
+                            r.id
+                        ),
+                    ));
+                }
+            }
+        }
+        if !(1..=16).contains(&r.cell_divisor) || !r.cell_divisor.is_power_of_two() {
+            out.push(Diagnostic::error(
+                "world.region.cell_divisor",
+                format!("{rp}/cell_divisor"),
+                format!(
+                    "cell_divisor {} must be a power of two in 1..=16",
+                    r.cell_divisor
+                ),
+            ));
+        }
+        // Coarse mesh vertices must be a subset of the fine mesh lattice:
+        // (cell*mesh_step) % (cell/divisor*region_step) == 0
+        let coarse_step = cell_size_m * world.export.mesh_step_cells as f64;
+        if r.cell_divisor > 0 && cell_size_m > 0.0 {
+            let fine_step = cell_size_m / r.cell_divisor as f64 * r.mesh_step_cells as f64;
+            let ratio = coarse_step / fine_step;
+            if fine_step > 0.0 && ratio.fract() != 0.0 {
+                out.push(
+                    Diagnostic::error(
+                        "world.region.mesh_step",
+                        format!("{rp}/mesh_step_cells"),
+                        format!(
+                            "fine vertex spacing {fine_step} does not evenly divide coarse spacing {coarse_step}"
+                        ),
+                    )
+                    .with_suggestion("choose mesh_step_cells so coarse mesh vertices are fine vertices"),
+                );
+            }
+        }
+        if r.extra_octaves > 6 {
+            out.push(Diagnostic::error(
+                "world.region.extra_octaves",
+                format!("{rp}/extra_octaves"),
+                format!("extra_octaves {} exceeds 6", r.extra_octaves),
+            ));
+        }
+        let side_x = (x1 as i64 - x0 as i64 + 1).max(0) as f64 * world.chunk_size_m;
+        let side_z = (z1 as i64 - z0 as i64 + 1).max(0) as f64 * world.chunk_size_m;
+        if !(r.blend_band_m > 0.0 && r.blend_band_m.is_finite())
+            || r.blend_band_m > side_x.min(side_z) / 2.0
+        {
+            out.push(Diagnostic::error(
+                "world.region.blend_band",
+                format!("{rp}/blend_band_m"),
+                format!(
+                    "blend_band_m {} must be positive and at most half the region's smaller side",
+                    r.blend_band_m
+                ),
+            ));
         }
     }
 }

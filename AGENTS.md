@@ -11,6 +11,14 @@
 The toolchain is pinned by `rust-toolchain.toml`; rustfmt and clippy are
 required components.
 
+## Generator versions
+
+`project.json` carries `generator_version` (default 1 when absent — never
+silently upgraded). Any intentional change to generated output (any
+generation golden re-bless) must bump `mb_seed::CURRENT_GENERATOR_VERSION`
+once released; old projects keep old output until `mybuilder upgrade`.
+Every bless requires `MB_BLESS_REASON` and appends to GOLDEN_CHANGELOG.md.
+
 ## Golden tests (determinism)
 
 Golden files are BLAKE3 hex digests at `crates/*/tests/golden/<name>.blake3`.

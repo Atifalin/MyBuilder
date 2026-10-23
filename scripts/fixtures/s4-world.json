@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "extent": {
+    "width_m": 2048.0,
+    "depth_m": 2048.0
+  },
+  "chunk_size_m": 256.0,
+  "sea_level_m": 0.0,
+  "mode": "land_first",
+  "terrain": {
+    "feel": "hilly",
+    "overrides": {}
+  },
+  "profile": {
+    "shelf_depth_m": 40.0,
+    "shelf_width_m": 300.0,
+    "coast_height_m": 2.0,
+    "inland_height_m": 30.0,
+    "inland_width_m": 400.0,
+    "mountain_height_m": 600.0,
+    "mountain_falloff_m": 250.0,
+    "feature_size_m": 512.0
+  },
+  "export": {
+    "mesh_step_cells": 4
+  },
+  "shapes": [
+    {
+      "id": "coast-1",
+      "kind": "land",
+      "points": [
+        [
+          700.0,
+          0.0
+        ],
+        [
+          610.0,
+          350.0
+        ],
+        [
+          350.0,
+          610.0
+        ],
+        [
+          0.0,
+          700.0
+        ],
+        [
+          -350.0,
+          610.0
+        ],
+        [
+          -610.0,
+          350.0
+        ],
+        [
+          -700.0,
+          0.0
+        ],
+        [
+          -610.0,
+          -350.0
+        ],
+        [
+          -350.0,
+          -610.0
+        ],
+        [
+          0.0,
+          -700.0
+        ],
+        [
+          350.0,
+          -610.0
+        ],
+        [
+          610.0,
+          -350.0
+        ]
+      ]
+    }
+  ],
+  "detail_regions": [
+    {
+      "id": "coast-village",
+      "chunk_min": [
+        5,
+        4
+      ],
+      "chunk_max": [
+        6,
+        5
+      ],
+      "cell_divisor": 2,
+      "mesh_step_cells": 2,
+      "extra_octaves": 2,
+      "blend_band_m": 16.0
+    }
+  ]
+}

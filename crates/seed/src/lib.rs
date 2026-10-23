@@ -7,6 +7,15 @@
 use std::fmt;
 use std::str::FromStr;
 
+/// Newest generator version this build writes. Bump it (once) whenever a
+/// released change intentionally alters generated output — i.e. whenever
+/// a generation golden is re-blessed. Pre-release, everything is v1.
+/// Lives in mb-seed because the golden-changelog helper needs it and
+/// mb-seed is the root of the dependency tree; mb-schema re-exports it.
+pub const CURRENT_GENERATOR_VERSION: u32 = 1;
+/// Oldest generator version this build can still run.
+pub const MIN_SUPPORTED_GENERATOR_VERSION: u32 = 1;
+
 /// BLAKE3 hash of `data`.
 pub fn hash_bytes(data: &[u8]) -> [u8; 32] {
     *blake3::hash(data).as_bytes()
@@ -159,6 +168,10 @@ pub mod serde_hex {
 /// file at `<crate>/tests/golden/<name>.blake3`. Set `MB_BLESS=1` to write
 /// or overwrite the file instead. A missing file without `MB_BLESS` fails
 /// with instructions.
+///
+/// Blessing a CHANGED or NEW golden additionally requires
+/// `MB_BLESS_REASON="why"`; the change is appended as one row to
+/// `GOLDEN_CHANGELOG.md` at the repo root.
 #[cfg(any(test, feature = "golden"))]
 pub mod golden {
     use std::path::{Path, PathBuf};
@@ -174,8 +187,20 @@ pub mod golden {
     pub fn check_hex(manifest_dir: &str, name: &str, actual: &str) {
         let path = golden_path(manifest_dir, name);
         if std::env::var("MB_BLESS").as_deref() == Ok("1") {
+            let old = std::fs::read_to_string(&path)
+                .ok()
+                .map(|s| s.trim().to_string());
+            if old.as_deref() == Some(actual.trim()) {
+                return; // unchanged: nothing to log
+            }
+            let reason = std::env::var("MB_BLESS_REASON").unwrap_or_else(|_| {
+                panic!(
+                    "MB_BLESS would change {name}: set MB_BLESS_REASON to explain why                      (it is appended to GOLDEN_CHANGELOG.md)"
+                )
+            });
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, format!("{actual}\n")).unwrap();
+            log_changelog(manifest_dir, name, old.as_deref(), actual.trim(), &reason);
             return;
         }
         match std::fs::read_to_string(&path) {
@@ -196,5 +221,55 @@ pub mod golden {
     pub fn check_hash(manifest_dir: &str, name: &str, data: &[u8]) {
         let hex = crate::hex_bytes(&crate::hash_bytes(data));
         check_hex(manifest_dir, name, &hex);
+    }
+
+    /// Civil (UTC) date from unix days — Gregorian, integer math only.
+    fn utc_date(secs: u64) -> (i64, u32, u32) {
+        let days = (secs / 86400) as i64;
+        // Howard Hinnant's civil-from-days, exact and branch-simple.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let mut y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        if m <= 2 {
+            y += 1;
+        }
+        (y, m, d)
+    }
+
+    /// Append one row to GOLDEN_CHANGELOG.md at the repo root
+    /// (manifest_dir is `<root>/crates/<crate>`), as a single-line append.
+    fn log_changelog(manifest_dir: &str, name: &str, old: Option<&str>, new: &str, reason: &str) {
+        let crate_dir = Path::new(manifest_dir)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let changelog = Path::new(manifest_dir).join("../../GOLDEN_CHANGELOG.md");
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let (y, m, d) = utc_date(secs);
+        let old12 = match old {
+            Some(o) => o.chars().take(12).collect::<String>(),
+            None => "(new)".to_string(),
+        };
+        let row = format!(
+            "| {y:04}-{m:02}-{d:02} | {} | {crate_dir}/{name} | {old12} | {new} | {reason} |\n",
+            crate::CURRENT_GENERATOR_VERSION
+        );
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&changelog)
+            .unwrap_or_else(|e| panic!("cannot open {}: {e}", changelog.display()));
+        f.write_all(row.as_bytes()).unwrap();
     }
 }

@@ -96,7 +96,7 @@ fn bundle() -> FileBundle {
     let (g, masks, dist, hf) = computed();
     let w = small_world();
     let p = small_project();
-    build_export_bundle(&g, &p, &w, &hf, &masks, &dist.coast)
+    build_export_bundle(&g, &p, &w, &hf, &masks, &dist.coast, &[])
 }
 
 fn file<'a>(b: &'a FileBundle, name: &str) -> &'a [u8] {
@@ -188,6 +188,7 @@ fn chunk_seams_bit_identical() {
         &normals,
         &dist.coast,
         0.0,
+        300.0,
         cells_per_chunk,
         step,
         0,
@@ -199,6 +200,7 @@ fn chunk_seams_bit_identical() {
         &normals,
         &dist.coast,
         0.0,
+        300.0,
         cells_per_chunk,
         step,
         1,
@@ -303,7 +305,7 @@ fn write_policy_partial_rebuild() {
         terrain,
         profile: &w.profile,
     });
-    let b2 = build_export_bundle(&g, &small_project(), &w, &hf, &masks, &dist.coast);
+    let b2 = build_export_bundle(&g, &small_project(), &w, &hf, &masks, &dist.coast, &[]);
     let r = write_outputs(&dir, &b2).unwrap();
     assert!(
         r.written
@@ -332,6 +334,7 @@ fn pipeline_stages_produce_bundle() {
         shapes: w.shapes.clone(),
         cell_size_m: 1.0,
         extent: w.extent,
+        generator_version: p.generator_version,
     }));
     pipe.add(Box::new(mb_terrain::stages::DistanceStage::new(g, 1.0, 1)));
     pipe.add(Box::new(HeightStage::new(g, p.clone(), w.clone(), 1)));
@@ -347,4 +350,324 @@ fn pipeline_stages_produce_bundle() {
         mb_seed::hash_bytes(file(&pipe_bundle, "layers/height.r16")),
         mb_seed::hash_bytes(file(&direct, "layers/height.r16")),
     );
+}
+
+// ---------- S4 detail regions ----------
+
+/// Small world plus a region covering coarse chunks [1,1]..[2,2]
+/// (world x/z in [-128, 128]), divisor 2, fine mesh_step 1, band 16 m.
+fn world_with_region() -> WorldRecipe {
+    let mut w = small_world();
+    w.detail_regions = vec![mb_schema::DetailRegion {
+        id: "village-1".into(),
+        chunk_min: [1, 1],
+        chunk_max: [2, 2],
+        cell_divisor: 2,
+        mesh_step_cells: 1,
+        extra_octaves: 2,
+        blend_band_m: 16.0,
+    }];
+    w
+}
+
+struct RegionSetup {
+    ctx: mb_terrain::HeightCtx,
+    hf: HeightField,
+    normals: Vec<[f32; 3]>,
+    rb: mb_terrain::region::RegionBuild,
+    rnorms: Vec<[f32; 3]>,
+    region: mb_schema::DetailRegion,
+}
+
+fn region_setup() -> RegionSetup {
+    let (g, _masks, dist, hf) = computed();
+    let w = world_with_region();
+    region_setup_for(g, &dist, hf, &w)
+}
+
+fn region_setup_for(g: Grid, dist: &Distances, hf: HeightField, w: &WorldRecipe) -> RegionSetup {
+    let terrain = w.terrain.feel.resolve(&w.terrain.overrides);
+    let ctx = mb_terrain::HeightCtx::new(g, dist, w.sea_level_m, 1, terrain, w.profile);
+    let normals = mb_terrain::mesh::normals(&g, &hf);
+    let region = w.detail_regions[0].clone();
+    let rb = mb_terrain::region::build_region_height(&ctx, &hf, &region, 128, 4);
+    let rnorms = mb_terrain::region::region_normals(&ctx, &normals, &rb, 4);
+    RegionSetup {
+        ctx,
+        hf,
+        normals,
+        rb,
+        rnorms,
+        region,
+    }
+}
+
+/// Fine-grid index for a fine node at the given distance (in meters)
+/// inside the region along +x on the border row z = -128.
+fn fine_idx(rb: &mb_terrain::region::RegionBuild, x: f64, z: f64) -> (usize, usize) {
+    let i = ((x - rb.fine.origin_x) / rb.fine.spacing).round() as usize;
+    let j = ((z - rb.fine.origin_z) / rb.fine.spacing).round() as usize;
+    (i, j)
+}
+
+#[test]
+fn region_border_bit_equal_to_coarse() {
+    let s = region_setup();
+    let g = s.ctx.grid;
+    // Coarse chunk (1,1) exported mesh.
+    let coarse = mb_terrain::mesh::chunk_mesh(
+        &g,
+        &s.hf,
+        &s.normals,
+        &s.ctx.coast,
+        0.0,
+        300.0,
+        128,
+        4,
+        1,
+        1,
+    );
+    // Fine chunk (1,1) of the region.
+    let fine = mb_terrain::region::region_chunk_mesh(
+        &s.ctx, &s.region, 128, &s.rb, &s.rnorms, 0.0, 300.0, 1, 1,
+    );
+    let fvside = 128 * 2 + 1; // per side at fine mesh_step 1
+    let cvside = 128 / 4 + 1;
+    // Region border for chunk (1,1) is its west edge: fine col 0 of the
+    // region grid = x = -128, coinciding with coarse mesh vertices every
+    // 4 cells = every 8 fine verts.
+    for cv in 0..cvside {
+        let ci = cv * cvside; // west column of coarse chunk 1_1
+        let fi_row = cv * 4 * 2; // fine row index (v direction): 4 coarse cells * div 2
+        let fi = fi_row * fvside;
+        let cwx = coarse.origin[0] + coarse.positions[ci][0] as f64;
+        let cwz = coarse.origin[2] + coarse.positions[ci][2] as f64;
+        let fwx = fine.origin[0] + fine.positions[fi][0] as f64;
+        let fwz = fine.origin[2] + fine.positions[fi][2] as f64;
+        assert_eq!(cwx, fwx, "border vertex {cv} x differs");
+        assert_eq!(cwz, fwz, "border vertex {cv} z differs");
+        assert_eq!(
+            coarse.positions[ci][1].to_bits(),
+            fine.positions[fi][1].to_bits(),
+            "border vertex {cv} height not bit-equal"
+        );
+        assert_eq!(
+            coarse.normals[ci], fine.normals[fi],
+            "border vertex {cv} normal not bit-equal"
+        );
+    }
+    let _ = s;
+}
+
+#[test]
+fn region_border_inbetweens_on_edge() {
+    let s = region_setup();
+    let g = s.ctx.grid;
+    let region = &s.region;
+    let rb = &s.rb;
+    // West border x = -128: fine nodes between coarse mesh vertices.
+    for fv in 1..8usize {
+        // fine vertex 0.5m*fv south of coarse vertex at -128,-128
+        let x = -128.0;
+        let z = -128.0 + fv as f64 * 0.5;
+        let (i, j) = fine_idx(rb, x, z);
+        let h = rb.h[j * rb.fine.nx + i];
+        let (cx0, cz0) = (-128.0, -128.0);
+        let t = (z - cz0) / 4.0;
+        let ha = mb_terrain::region::coarse_mesh_height(&g, &s.hf, 4, cx0, cz0);
+        let hb = mb_terrain::region::coarse_mesh_height(&g, &s.hf, 4, cx0, cz0 + 4.0);
+        let expected = ha + t * (hb - ha);
+        assert!(
+            (h - expected).abs() < 1e-4,
+            "border vertex at z={z}: h={h} expected~{expected}"
+        );
+        // Normal equals n_coarse (w = 0 on the border).
+        let nc = mb_terrain::region::coarse_mesh_normal(&g, &s.normals, 4, x, z);
+        let n = s.rnorms[j * rb.fine.nx + i];
+        for k in 0..3 {
+            assert!(
+                (n[k] as f64 - nc[k]).abs() < 1e-3,
+                "normal mismatch on border at z={z}"
+            );
+        }
+        let _ = region;
+    }
+}
+
+#[test]
+fn region_normal_continuity() {
+    let s = region_setup();
+    let rb = &s.rb;
+    // Walk inward along x at fixed z through the blend band; adjacent
+    // fine normals must not jump. Bound: 0.35 rad (~20 deg) — generous
+    // for a blend over 16 m at 0.5 m spacing where detail noise adds at
+    // most a few degrees per step; a real discontinuity would be >>1 rad.
+    let z = 0.0;
+    let j = ((z - rb.fine.origin_z) / rb.fine.spacing).round() as usize;
+    let i0 = ((-128.0 - rb.fine.origin_x) / rb.fine.spacing).round() as usize;
+    let i1 = ((-96.0 - rb.fine.origin_x) / rb.fine.spacing).round() as usize;
+    for i in i0 + 1..i1 {
+        let a = s.rnorms[j * rb.fine.nx + i - 1];
+        let b = s.rnorms[j * rb.fine.nx + i];
+        let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0);
+        let ang = (dot as f64).acos();
+        assert!(ang < 0.35, "normal jump {ang} rad at fine i={i}");
+    }
+    let _ = s;
+}
+
+#[test]
+fn height_at_bilinear_exact_and_continuous() {
+    let (g, _m, dist, hf) = computed();
+    let w = world_with_region();
+    let terrain = w.terrain.feel.resolve(&w.terrain.overrides);
+    let ctx = mb_terrain::HeightCtx::new(g, &dist, w.sea_level_m, 1, terrain, w.profile);
+    // At coarse nodes, height_at equals the coarse grid bit-for-bit.
+    for j in (0..g.nz).step_by(37) {
+        for i in (0..g.nx).step_by(37) {
+            assert_eq!(
+                ctx.height_at(g.x(i), g.z(j)).to_bits(),
+                hf.h[j * g.nx + i].to_bits(),
+                "height_at not bit-exact at node ({i},{j})"
+            );
+        }
+    }
+    // Continuity: 0.05 m steps along a diagonal crossing several cells.
+    const MAX_SLOPE: f64 = 2.0;
+    let mut prev = ctx.height_at(-200.0, -200.0);
+    for k in 1..400 {
+        let x = -200.0 + k as f64 * 0.05;
+        let z = -200.0 + k as f64 * 0.05;
+        let h = ctx.height_at(x, z);
+        assert!(
+            (h - prev).abs() <= MAX_SLOPE * 0.05 + 1e-9,
+            "jump {} at ({x},{z})",
+            h - prev
+        );
+        prev = h;
+    }
+}
+
+#[test]
+fn region_interior_matches_true() {
+    let s = region_setup();
+    let rb = &s.rb;
+    let region = &s.region;
+    let base_oct = s.ctx.fbm_params.octaves;
+    let norm_n = mb_geom::fbm_norm(&s.ctx.fbm_params, base_oct);
+    // Center of the region is far past the 16 m band -> w = 1.
+    for (x, z) in [(0.0, 0.0), (20.0, -30.0), (-50.0, 60.0)] {
+        let (i, j) = fine_idx(rb, x, z);
+        let idx = j * rb.fine.nx + i;
+        assert_eq!(rb.w[idx], 1.0, "w != 1 at interior ({x},{z})");
+        let d = s.ctx.coast_at(x, z);
+        let detail = s.ctx.terrain.relief_m
+            * s.ctx.amplitude(d)
+            * mb_geom::fbm_octave_sum(
+                &s.ctx.perlin_f,
+                x,
+                z,
+                &s.ctx.fbm_params,
+                base_oct,
+                base_oct + region.extra_octaves,
+            )
+            / norm_n;
+        let htrue = s.ctx.height_at(x, z) + detail;
+        assert_eq!(rb.h[idx], htrue, "interior h_final != h_true");
+    }
+}
+
+// ---- region output plumbing ----
+
+fn region_bundle() -> FileBundle {
+    let (g, masks, dist, hf) = computed();
+    let w = world_with_region();
+    let p = small_project();
+    let region = &w.detail_regions[0];
+    let terrain = w.terrain.feel.resolve(&w.terrain.overrides);
+    let ctx = mb_terrain::HeightCtx::new(g, &dist, w.sea_level_m, 1, terrain, w.profile);
+    let normals = mb_terrain::mesh::normals(&g, &hf);
+    let rb = mb_terrain::region::build_region_height(&ctx, &hf, region, 128, 4);
+    let rnorms = mb_terrain::region::region_normals(&ctx, &normals, &rb, 4);
+    let mut files = Vec::new();
+    let mut entries = Vec::new();
+    for cz in 1u32..=2 {
+        for cx in 1u32..=2 {
+            let mesh = mb_terrain::region::region_chunk_mesh(
+                &ctx,
+                region,
+                128,
+                &rb,
+                &rnorms,
+                w.sea_level_m,
+                w.profile.snow_line_m,
+                cx as usize,
+                cz as usize,
+            );
+            let id = mb_seed::EntityId::from_path(
+                1,
+                &[
+                    ("world", "main"),
+                    ("region", "village-1"),
+                    ("chunk", &format!("{cx}_{cz}")),
+                ],
+            );
+            let glb = mb_terrain::glb::chunk_glb(
+                &mesh,
+                &format!("chunk_{cx}_{cz}"),
+                &id.to_string(),
+                cx as usize,
+                cz as usize,
+            );
+            entries.push(serde_json::json!({
+                "id": id.to_string(), "cx": cx, "cz": cz, "region": region.id,
+                "file": format!("regions/{}/chunk_{cx}_{cz}.glb", region.id),
+                "origin": mesh.origin,
+                "vertex_count": mesh.vertex_count,
+                "triangle_count": mesh.triangle_count,
+                "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&glb)),
+            }));
+            files.push((
+                format!("exports/terrain/regions/village-1/chunk_{cx}_{cz}.glb"),
+                glb,
+            ));
+        }
+    }
+    let ro = mb_terrain::outputs::RegionOutput {
+        region: region.clone(),
+        entries: serde_json::Value::Array(entries),
+        files,
+    };
+    build_export_bundle(&g, &p, &w, &hf, &masks, &dist.coast, &[ro])
+}
+
+#[test]
+fn golden_region_chunk() {
+    let b = region_bundle();
+    mb_seed::golden::check_hash(
+        DIR,
+        "region_chunk_1_1_glb",
+        file(&b, "exports/terrain/regions/village-1/chunk_1_1.glb"),
+    );
+}
+
+#[test]
+fn golden_manifest_with_region() {
+    let b = region_bundle();
+    mb_seed::golden::check_hash(
+        DIR,
+        "manifest_region",
+        file(&b, "exports/terrain/manifest.json"),
+    );
+    // Superseded markers present.
+    let m: serde_json::Value =
+        serde_json::from_slice(file(&b, "exports/terrain/manifest.json")).unwrap();
+    let sup = m["chunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c.get("superseded_by").is_some())
+        .count();
+    assert_eq!(sup, 4);
+    assert_eq!(m["regions"][0]["id"], "village-1");
 }

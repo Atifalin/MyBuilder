@@ -45,7 +45,14 @@ func _initialize() -> void:
 	var union := AABB()
 	var loaded := 0
 	var extras_seen := 0
+	var work: Array = []
 	for c in chunks:
+		if not c.has("superseded_by"):
+			work.append(c)
+	for reg in manifest.get("regions", []):
+		for c in reg["chunks"]:
+			work.append(c)
+	for c in work:
 		var glb_path := base_dir.path_join(c["file"])
 		var doc := GLTFDocument.new()
 		var state := GLTFState.new()
@@ -155,11 +162,26 @@ func render_png(png_path: String, ctx) -> void:
 	var cam := Camera3D.new()
 	# 45 degrees above the world centre, far enough to see it all.
 	var dist: float = max(w, d) * 1.1
-	cam.position = Vector3(0, dist * 0.75 + h_max, dist * 0.75)
 	cam.far = dist * 4.0
 	root.add_child(cam)
-	# look_at_from_position works even before the node is in the tree.
-	cam.look_at_from_position(cam.position, Vector3(0, 0, 0), Vector3.UP)
+	# S4: --border <x,z> aims a low grazing camera at that world point
+	# (a region border); default is a high 45-degree overview.
+	var bpos := Vector3(0, 0, 0)
+	var border := ""
+	var uargs := OS.get_cmdline_user_args()
+	for i in uargs.size():
+		if uargs[i] == "--border" and i + 1 < uargs.size():
+			border = uargs[i + 1]
+	if border != "":
+		var pp := border.split(",")
+		bpos = Vector3(pp[0].to_float(), 0, pp[1].to_float())
+		cam.position = bpos + Vector3(-35, 25, 0)
+		cam.look_at_from_position(cam.position, bpos, Vector3.UP)
+	else:
+		cam.position = Vector3(0, dist * 0.75 + h_max, dist * 0.75)
+		cam.look_at_from_position(cam.position, Vector3(0, 0, 0), Vector3.UP)
+	if OS.get_environment("MB_WIRE") == "1":
+		get_root().debug_draw = Viewport.DEBUG_DRAW_WIREFRAME
 	cam.current = true
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-50, -30, 0)

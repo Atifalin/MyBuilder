@@ -47,7 +47,10 @@ def main() -> int:
 
     failures = []
     imported = []
-    for c in chunks:
+    work = [c for c in chunks if "superseded_by" not in c]
+    for reg in manifest.get("regions", []):
+        work.extend(reg["chunks"])
+    for c in work:
         path = os.path.join(base, c["file"])
         before = set(bpy.data.objects)
         try:
@@ -60,8 +63,8 @@ def main() -> int:
             wire_color_attribute(obj)
         imported.extend(new_objs)
 
-    if len(imported) != len(chunks):
-        failures.append(f"imported {len(imported)} objects, manifest lists {len(chunks)}")
+    if len(imported) != len(work):
+        failures.append(f"imported {len(imported)} objects, manifest lists {len(work)}")
 
     # Combined world-space bounding box. glTF Y-up -> Blender Z-up, so
     # glTF z maps to Blender -y.

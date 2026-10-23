@@ -48,6 +48,14 @@ impl FileBundle {
 pub const MANIFEST_PATH: &str = "exports/terrain/manifest.json";
 
 /// Build every output file for a world build.
+/// Region data for the manifest + output files: per region, the manifest
+/// chunk entries (parsed JSON) and the region's output files.
+pub struct RegionOutput {
+    pub region: mb_schema::DetailRegion,
+    pub entries: serde_json::Value,
+    pub files: Vec<(String, Vec<u8>)>,
+}
+
 pub fn build_export_bundle(
     grid: &Grid,
     project: &ProjectFile,
@@ -55,6 +63,7 @@ pub fn build_export_bundle(
     hf: &HeightField,
     masks: &Masks,
     coast: &[f64],
+    regions: &[RegionOutput],
 ) -> FileBundle {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let n = grid.len();
@@ -110,6 +119,16 @@ pub fn build_export_bundle(
     let cells_per_chunk = (world.chunk_size_m / grid.cell) as usize;
     let ncx = (grid.nx - 1) / cells_per_chunk;
     let ncz = (grid.nz - 1) / cells_per_chunk;
+    // Coarse chunks covered by a region are superseded by it.
+    let mut superseded: std::collections::BTreeMap<(u32, u32), &str> =
+        std::collections::BTreeMap::new();
+    for ro in regions {
+        for cx in ro.region.chunk_min[0]..=ro.region.chunk_max[0] {
+            for cz in ro.region.chunk_min[1]..=ro.region.chunk_max[1] {
+                superseded.insert((cx, cz), ro.region.id.as_str());
+            }
+        }
+    }
     let mut chunk_entries = Vec::new();
     let (mut total_v, mut total_t) = (0usize, 0usize);
     for cz in 0..ncz {
@@ -125,13 +144,14 @@ pub fn build_export_bundle(
                 &normals_full,
                 coast,
                 world.sea_level_m,
+                world.profile.snow_line_m,
                 cells_per_chunk,
                 step,
                 cx,
                 cz,
             );
             let glb = chunk_glb(&mesh, &name, &id.to_string(), cx, cz);
-            chunk_entries.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "id": id.to_string(),
                 "cx": cx,
                 "cz": cz,
@@ -140,10 +160,45 @@ pub fn build_export_bundle(
                 "vertex_count": mesh.vertex_count,
                 "triangle_count": mesh.triangle_count,
                 "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&glb)),
-            }));
+            });
+            if let Some(rid) = superseded.get(&(cx as u32, cz as u32)) {
+                entry["superseded_by"] = serde_json::json!(rid);
+            }
+            chunk_entries.push(entry);
             total_v += mesh.vertex_count;
             total_t += mesh.triangle_count;
             files.push((format!("exports/terrain/{name}.glb"), glb));
+        }
+    }
+
+    // Region manifest entries, sorted by region id.
+    let mut region_manifest: Vec<serde_json::Value> = regions
+        .iter()
+        .map(|ro| {
+            let r = &ro.region;
+            serde_json::json!({
+                "id": r.id,
+                "chunk_min": r.chunk_min,
+                "chunk_max": r.chunk_max,
+                "cell_divisor": r.cell_divisor,
+                "mesh_step_cells": r.mesh_step_cells,
+                "extra_octaves": r.extra_octaves,
+                "blend_band_m": r.blend_band_m,
+                "chunks": ro.entries,
+            })
+        })
+        .collect();
+    region_manifest.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    for ro in regions {
+        for f in &ro.files {
+            total_v += 0; // vertex totals counted via manifest entries
+            files.push(f.clone());
+        }
+    }
+    for ro in regions {
+        for e in ro.entries.as_array().unwrap_or(&vec![]) {
+            total_v += e["vertex_count"].as_u64().unwrap_or(0) as usize;
+            total_t += e["triangle_count"].as_u64().unwrap_or(0) as usize;
         }
     }
 
@@ -160,6 +215,7 @@ pub fn build_export_bundle(
         "h_max": hf.h_max,
         "layers": "layers/layers.json",
         "chunks": chunk_entries,
+        "regions": region_manifest,
         "totals": {
             "chunks": ncx * ncz,
             "vertices": total_v,

@@ -279,3 +279,95 @@ fn err_recipe_path_parent_component() {
 fn err_recipe_path_empty() {
     assert_invalid_recipe_path("", "empty");
 }
+
+// --- detail region rules ---
+
+fn region(id: &str) -> DetailRegion {
+    DetailRegion {
+        id: id.into(),
+        chunk_min: [1, 1],
+        chunk_max: [2, 2],
+        cell_divisor: 2,
+        mesh_step_cells: 1,
+        extra_octaves: 2,
+        blend_band_m: 16.0,
+    }
+}
+
+fn w_region(r: DetailRegion) -> WorldRecipe {
+    let mut w = world();
+    w.detail_regions = vec![r];
+    w
+}
+
+#[test]
+fn err_region_empty_id() {
+    let mut r = region("x");
+    r.id = String::new();
+    assert!(codes(&validate_project(&project(), &w_region(r))).contains(&"world.region.empty_id"));
+}
+#[test]
+fn err_region_duplicate_id() {
+    let mut w = world();
+    w.detail_regions = vec![region("a"), region("a")];
+    assert!(codes(&validate_project(&project(), &w)).contains(&"world.region.duplicate_id"));
+}
+#[test]
+fn err_region_chunk_range() {
+    let mut r = region("x");
+    r.chunk_max = [9, 9]; // grid is 8x8
+    assert!(
+        codes(&validate_project(&project(), &w_region(r))).contains(&"world.region.chunk_range")
+    );
+    let mut r2 = region("y");
+    r2.chunk_min = [2, 2];
+    r2.chunk_max = [1, 1];
+    assert!(
+        codes(&validate_project(&project(), &w_region(r2))).contains(&"world.region.chunk_range")
+    );
+}
+#[test]
+fn err_region_overlap() {
+    let mut w = world();
+    let mut r2 = region("b");
+    r2.chunk_min = [2, 2];
+    r2.chunk_max = [3, 3];
+    w.detail_regions = vec![region("a"), r2];
+    assert!(codes(&validate_project(&project(), &w)).contains(&"world.region.overlap"));
+}
+#[test]
+fn err_region_cell_divisor() {
+    let mut r = region("x");
+    r.cell_divisor = 3;
+    assert!(
+        codes(&validate_project(&project(), &w_region(r))).contains(&"world.region.cell_divisor")
+    );
+}
+#[test]
+fn err_region_mesh_step() {
+    // coarse spacing 4 m; fine = 1/2 * 3 = 1.5 -> 4/1.5 not integer
+    let mut r = region("x");
+    r.mesh_step_cells = 3;
+    assert!(codes(&validate_project(&project(), &w_region(r))).contains(&"world.region.mesh_step"));
+}
+#[test]
+fn err_region_extra_octaves() {
+    let mut r = region("x");
+    r.extra_octaves = 7;
+    assert!(
+        codes(&validate_project(&project(), &w_region(r))).contains(&"world.region.extra_octaves")
+    );
+}
+#[test]
+fn err_region_blend_band() {
+    let mut r = region("x");
+    r.blend_band_m = 0.0;
+    assert!(
+        codes(&validate_project(&project(), &w_region(r))).contains(&"world.region.blend_band")
+    );
+    let mut r2 = region("y");
+    r2.blend_band_m = 300.0; // side 512, half=256
+    assert!(
+        codes(&validate_project(&project(), &w_region(r2))).contains(&"world.region.blend_band")
+    );
+}

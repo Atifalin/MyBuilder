@@ -12,3 +12,9 @@ serde = { workspace = true, features = ["derive"], optional = true }
 default = []
 serde = ["dep:serde"]
 golden = []
+
+# Self dev-dependency so integration tests always see the `golden` module,
+# even when `cargo test -p mb-seed` runs without workspace feature
+# unification from other crates' dev-deps.
+[dev-dependencies]
+mb-seed = { path = ".", features = ["golden"] }

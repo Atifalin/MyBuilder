@@ -263,6 +263,10 @@ fn assert_invalid_recipe_path(path: &str, tag: &str) {
 #[test]
 fn err_recipe_path_absolute() {
     assert_invalid_recipe_path("/etc/passwd", "abs");
+    assert_invalid_recipe_path("\\Windows\\win.ini", "abs_backslash");
+    assert_invalid_recipe_path("C:\\outside.json", "abs_drive");
+    assert_invalid_recipe_path("C:outside.json", "drive_relative");
+    assert_invalid_recipe_path("recipes\\..\\..\\outside.json", "parent_backslash");
 }
 
 #[test]

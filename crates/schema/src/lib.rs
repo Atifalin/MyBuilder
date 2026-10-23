@@ -499,10 +499,10 @@ fn terrain_override_diags(o: &TerrainOverrides, out: &mut Vec<Diagnostic>) {
 /// outside its own directory.
 fn recipe_path_is_invalid(p: &str) -> bool {
     p.is_empty()
+        || p.starts_with(['/', '\\'])
+        || p.contains(':')
         || Path::new(p).is_absolute()
-        || Path::new(p)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+        || p.split(['/', '\\']).any(|seg| seg == "..")
 }
 
 /// Validate a project + world recipe pair. Returns diagnostics in a

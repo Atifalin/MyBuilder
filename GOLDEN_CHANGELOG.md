@@ -56,3 +56,8 @@ that never reached a commit.
 | 2026-10-23 | 3 | terrain/gen3_manifest | 99ea7e42bbf4 | 7301d81c0596b689770ad2c246078497c5159bbbf2ff015394abc905bde7bbbf | generator 3: carve with exact Euclidean nearest-river distance (was L1 chamfer); fixture region moved over the river |
 | 2026-10-23 | 3 | schema/canonical_project | 85e4426bfa80 | 5593599747a9354a9e1efec86407f35bdf40d3e9dbaa47bb853b677ff9924b17 | generator_version 3 becomes the default for new projects |
 | 2026-10-23 | 3 | schema/canonical_world | 37bf2c41f19b | 5e3e505d17fc34cd16387fe4649bb7b425b302fb220d2faf5332d3aa61ae6955 | generator_version 3 becomes the default for new projects |
+| 2026-10-23 | 3 | terrain/gen3_manifest | 7301d81c0596 | fec1e997acef876bff096992b1ea3b76f958da7d76326e889ecbe8b69d92be25 | generator 3b: water_dist texturing, water meshes, lakes in manifest |
+| 2026-10-23 | 3 | terrain/gen3_manifest | fec1e997acef | 26bca1582052692dbbfe0eee80b3fb7b4bc95fd2b646f40e20374d79c9410581 | generator 3b: water_dist texturing, water meshes, lakes in manifest |
+| 2026-10-23 | 3 | terrain/gen3_height_r16 | 9133a4e9467e | b214f503bfd728b231aeb7831ccacfb51dbbcd2e6791399ff194879b2c4e241c | gen-3 test fixture: shorter noise wavelength and lake thresholds so it forms lakes (exercises lake-flatness test) |
+| 2026-10-23 | 3 | terrain/gen3_river_mask | 991cb98d04d7 | 3f671407a8f747d04affae576a1b860e2637d6e17acd1115705d0889ca598c78 | gen-3 test fixture: shorter noise wavelength and lake thresholds so it forms lakes (exercises lake-flatness test) |
+| 2026-10-23 | 3 | terrain/gen3_manifest | 26bca1582052 | 0d48591e72d127a3b3cc3cd77bebec49d32829bfd16f842b2ee81cdb0bfc341f | gen-3 test fixture: shorter noise wavelength and lake thresholds so it forms lakes (exercises lake-flatness test) |

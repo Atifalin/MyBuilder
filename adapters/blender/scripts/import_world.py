@@ -128,6 +128,20 @@ def main() -> int:
                 wire_splat_material(obj, os.path.join(base, c["splat"]["file"]))
             else:
                 wire_color_attribute(obj)
+        # gen 3: water surface chunk
+        if "water" in c:
+            wpath = os.path.join(base, c["water"]["file"])
+            before2 = set(bpy.data.objects)
+            try:
+                bpy.ops.import_scene.gltf(filepath=wpath)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"water gltf import failed for {c['file']}: {e}")
+            for obj in [o for o in bpy.data.objects if o not in before2]:
+                if obj.type == 'MESH' and obj.material_slots:
+                    m = obj.material_slots[0].material
+                    if m is not None:
+                        m.blend_method = 'BLEND'
+                        m.diffuse_color = (0.1, 0.35, 0.65, 0.6)
         imported.extend(new_objs)
         if "splat_channels" in manifest and "splat" in c:
             for obj in new_objs:

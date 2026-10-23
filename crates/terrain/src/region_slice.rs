@@ -190,7 +190,12 @@ pub fn run_region_chunk(
             m.uvs.push([x as f32, z as f32]);
             let lx = vg.origin_x + (x - grid.x(wi0));
             let lz = vg.origin_z + (z - grid.z(wj0));
-            let d = ctx.coast_at(lx, lz);
+            let d = if !rs.water_dist.is_empty() {
+                ctx.coast_at(lx, lz)
+                    .min(crate::bilinear(&vg, &rs.water_dist, lx, lz))
+            } else {
+                ctx.coast_at(lx, lz)
+            };
             if generator_version >= 2 {
                 // gen 2: weights at fine res; slope via central
                 // differences on the fine height grid.
@@ -273,7 +278,12 @@ pub fn run_region_chunk(
                 let gmag = (ddx * ddx + ddz * ddz).sqrt();
                 let lx = vg.origin_x + (x - grid.x(wi0));
                 let lz = vg.origin_z + (z - grid.z(wj0));
-                let d = ctx.coast_at(lx, lz);
+                let d = if !rs.water_dist.is_empty() {
+                    ctx.coast_at(lx, lz)
+                        .min(crate::bilinear(&vg, &rs.water_dist, lx, lz))
+                } else {
+                    ctx.coast_at(lx, lz)
+                };
                 let w = crate::splat_weights(
                     h[idx],
                     gmag,

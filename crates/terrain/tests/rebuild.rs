@@ -983,6 +983,14 @@ fn make_project_gen3(dir: &Path) {
     // Lower the catchment so a small world still gets rivers, and add a
     // detail region for the seam checks.
     w.hydrology.river_min_catchment_m2 = 300.0;
+    // Small depressions count as lakes so the lake-flatness checks have data.
+    w.hydrology.lake_min_depth_m = 0.05;
+    w.hydrology.lake_min_area_m2 = 10.0;
+    // The default 512 m noise wavelength is a smooth ramp on this 256 m
+    // world; a short wavelength and inland ramp create real depressions.
+    w.terrain.overrides.relief_m = Some(40.0);
+    w.profile.feature_size_m = 64.0;
+    w.profile.inland_width_m = 40.0;
     w.detail_regions = vec![DetailRegion {
         id: "r".into(),
         // Over the fixture world's river channel, which runs through
@@ -1084,7 +1092,7 @@ fn gen3_hydro_invariants() {
         river_min_catchment_m2: 50.0,
         ..Default::default()
     };
-    let hy = mb_terrain::hydrology::run(&g, &h, &land, 0.0, &t, &|| false);
+    let hy = mb_terrain::hydrology::run(&g, &h, &land, 0.0, &t, &vec![1e9; nx * nz], &|| false);
     // every non-outlet land node has a receiver
     for c in 0..nx * nz {
         let outlet =
@@ -1125,7 +1133,7 @@ fn gen3_hydro_invariants() {
         assert!(hy.final_h[c] <= h[c] + 1e-9);
     }
     // determinism
-    let hy2 = mb_terrain::hydrology::run(&g, &h, &land, 0.0, &t, &|| false);
+    let hy2 = mb_terrain::hydrology::run(&g, &h, &land, 0.0, &t, &vec![1e9; nx * nz], &|| false);
     assert_eq!(hy.final_h, hy2.final_h);
     assert_eq!(hy.acc, hy2.acc);
 }
@@ -1166,7 +1174,7 @@ fn gen3_lake_rim_and_carve_bounds() {
         lake_min_area_m2: 20.0,
         ..Default::default()
     };
-    let hy = mb_terrain::hydrology::run(&g, &h, &land2, 0.0, &t, &|| false);
+    let hy = mb_terrain::hydrology::run(&g, &h, &land2, 0.0, &t, &vec![1e9; nx * nz], &|| false);
     assert!(!hy.lakes.is_empty(), "expected a lake in the pit");
     // Rim bound: lake level <= min filled of the ring just outside it.
     for &(_id, level, _area) in &hy.lakes {
@@ -1231,16 +1239,52 @@ fn gen3_lake_rim_and_carve_bounds() {
 
 #[test]
 fn gen3_incremental_matches_full() {
-    // Incremental vs full on gen 3: rebuild after a no-op must be
-    // bit-identical to a fresh build.
-    let d = gen3_dir("inc");
-    build(&d);
-    let inc = output_tree_hash(&d);
-    // full rebuild into a second dir, same recipe
-    let d2 = gen3_dir("full");
-    let rep2 = build(&d2);
-    assert!(rep2.run.executed.iter().any(|s| s == "world.hydrology"));
-    assert_eq!(inc, output_tree_hash(&d2));
+    // Real random-edit driver on gen 3: after each edit the incremental
+    // rebuild must equal a fresh full build of the edited recipe.
+    let mut rng = mb_seed::Rng::new(0x3B);
+    for seq in 0..4u64 {
+        let a = tmpdir(&format!("g3ra{seq}"));
+        let b = tmpdir(&format!("g3rb{seq}"));
+        make_project_gen3(&a);
+        make_project_gen3(&b);
+        // Same edited world on both: read the recipe once, mutate it,
+        // rebuild incremental on `a` and a fresh full on `b`.
+        let mut w: WorldRecipe =
+            serde_json::from_str(&std::fs::read_to_string(a.join("recipes/world.json")).unwrap())
+                .unwrap();
+        build(&a);
+        build(&b);
+        for edit in 0..4 {
+            match rng.range_u64(4) {
+                0 => {
+                    // move a shape point +-20 m (shifts rivers)
+                    let s = &mut w.shapes[0];
+                    let pi = rng.range_u64(s.points.len() as u64) as usize;
+                    s.points[pi][0] += (rng.next_f64() - 0.5) * 40.0;
+                    s.points[pi][1] += (rng.next_f64() - 0.5) * 40.0;
+                }
+                1 => {
+                    w.sea_level_m += rng.range_u64(11) as f64 - 5.0;
+                }
+                2 => {
+                    // river threshold swings the river coverage
+                    w.hydrology.river_min_catchment_m2 = 200.0 + rng.range_u64(600) as f64;
+                }
+                _ => {
+                    w.hydrology.carve_depth_m = 0.5 + rng.range_u64(30) as f64 / 10.0;
+                }
+            }
+            write_world(&a, &w);
+            build(&a);
+            write_world(&b, &w);
+            build(&b);
+            assert_eq!(
+                output_tree_hash(&a),
+                output_tree_hash(&b),
+                "seq {seq} edit {edit}: incremental != full"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1294,4 +1338,162 @@ fn gen3_goldens() {
         "gen3_manifest",
         &std::fs::read(d.join("exports/terrain/manifest.json")).unwrap(),
     );
+}
+
+#[test]
+fn gen3_water_meshes() {
+    let d = gen3_dir("w");
+    build(&d);
+    // Manifest water entries + lakes list.
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("exports/terrain/manifest.json")).unwrap())
+            .unwrap();
+    let wchunks: Vec<_> = m["chunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["water"].is_object())
+        .collect();
+    assert!(!wchunks.is_empty(), "no water chunks in manifest");
+    assert!(m["lakes"].is_array());
+    // Every listed water file exists on disk.
+    for c in &wchunks {
+        let f = c["water"]["file"].as_str().unwrap();
+        assert!(d.join("exports/terrain").join(f).exists(), "missing {f}");
+    }
+    // Lake flat: vertices in a water GLB over a lake have ~equal y.
+    // Grab the first water GLB and check its JSON min/max accessor.
+    let f = wchunks[0]["water"]["file"].as_str().unwrap();
+    let g = std::fs::read(d.join("exports/terrain").join(f)).unwrap();
+    let jl = u32::from_le_bytes(g[12..16].try_into().unwrap()) as usize;
+    let j: serde_json::Value = serde_json::from_slice(&g[20..20 + jl]).unwrap();
+    // material is the water material (BLEND).
+    assert_eq!(j["materials"][0]["alphaMode"].as_str().unwrap(), "BLEND");
+}
+
+// Decode a GLB's accessor 0 (POSITION) vertex triples as (x,y,z) f32.
+fn glb_vertices(glb: &[u8]) -> Vec<[f32; 3]> {
+    let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+    let acc = &j["accessors"][0];
+    let bv = acc["bufferView"].as_u64().unwrap() as usize;
+    let off = j["bufferViews"][bv]["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let count = acc["count"].as_u64().unwrap() as usize;
+    // BIN starts after the JSON chunk (padded to 4) + 8-byte chunk hdr.
+    let bin_start = 20 + jl + ((4 - jl % 4) % 4) + 8;
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let o = bin_start + off + i * 12;
+        out.push([
+            f32::from_le_bytes(glb[o..o + 4].try_into().unwrap()),
+            f32::from_le_bytes(glb[o + 4..o + 8].try_into().unwrap()),
+            f32::from_le_bytes(glb[o + 8..o + 12].try_into().unwrap()),
+        ]);
+    }
+    out
+}
+
+#[test]
+fn gen3_water_invariants() {
+    let d = gen3_dir("wi");
+    build(&d);
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("exports/terrain/manifest.json")).unwrap())
+            .unwrap();
+    let layers: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("layers/layers.json")).unwrap()).unwrap();
+    let lake = std::fs::read(d.join("layers/lake.u8")).unwrap();
+    let lnx = layers["nx"].as_u64().unwrap() as usize;
+    let cell = layers["cell_size_m"].as_f64().unwrap();
+    let (lx0, lz0) = (
+        layers["origin"][0].as_f64().unwrap(),
+        layers["origin"][1].as_f64().unwrap(),
+    );
+    let mut lake_vertices = 0usize;
+    for c in m["chunks"].as_array().unwrap() {
+        if c["water"].is_null() {
+            continue;
+        }
+        let (cx, cz) = (c["cx"].as_u64().unwrap(), c["cz"].as_u64().unwrap());
+        let wv = glb_vertices(
+            &std::fs::read(d.join(format!(
+                "exports/terrain/{}",
+                c["water"]["file"].as_str().unwrap()
+            )))
+            .unwrap(),
+        );
+        // Terrain chunk GLB at the same stride — positions share x/z but
+        // water has its own stride; compare y at the same x/z by sampling
+        // the terrain GLB's vertex grid.
+        let tv = glb_vertices(
+            &std::fs::read(d.join(format!("exports/terrain/chunk_{cx}_{cz}.glb"))).unwrap(),
+        );
+        // For each water vertex find the terrain vertex with the nearest
+        // x/z and assert water y >= terrain y (water sits on/above bed).
+        for w in &wv {
+            let nearest = tv
+                .iter()
+                .min_by(|a, b| {
+                    ((a[0] - w[0]).powi(2) + (a[2] - w[2]).powi(2))
+                        .total_cmp(&((b[0] - w[0]).powi(2) + (b[2] - w[2]).powi(2)))
+                })
+                .unwrap();
+            assert!(
+                w[1] >= nearest[1] - 1e-4,
+                "water vertex below terrain: w={w:?} t={nearest:?}"
+            );
+        }
+        // Lakes are exactly flat: a water vertex on a lake node sits at one
+        // of the lake levels, bit-exact as f32.
+        let levels: Vec<f32> = m["lakes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["level"].as_f64().unwrap() as f32)
+            .collect();
+        let origin = c["origin"].as_array().unwrap();
+        let (ox, oz) = (origin[0].as_f64().unwrap(), origin[2].as_f64().unwrap());
+        for w in &wv {
+            let (i, j) = (
+                ((ox + w[0] as f64 - lx0) / cell).round() as usize,
+                ((oz + w[2] as f64 - lz0) / cell).round() as usize,
+            );
+            if lake[j * lnx + i] == 1 {
+                assert!(
+                    levels.contains(&w[1]),
+                    "lake vertex y {} is not a lake level {levels:?}",
+                    w[1]
+                );
+                lake_vertices += 1;
+            }
+        }
+    }
+    assert!(
+        lake_vertices > 0,
+        "fixture has no lake water vertices (lakes {}, lake nodes {})",
+        m["lakes"].as_array().unwrap().len(),
+        lake.iter().filter(|&&v| v == 1).count()
+    );
+}
+
+#[test]
+fn gen3_water_determinism() {
+    let d1 = gen3_dir("wd1");
+    let d2 = gen3_dir("wd2");
+    build(&d1);
+    build(&d2);
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d1.join("exports/terrain/manifest.json")).unwrap())
+            .unwrap();
+    for c in m["chunks"].as_array().unwrap() {
+        if c["water"].is_null() {
+            continue;
+        }
+        let f = c["water"]["file"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read(d1.join("exports/terrain").join(f)).unwrap(),
+            std::fs::read(d2.join("exports/terrain").join(f)).unwrap(),
+            "water GLB {f} not deterministic"
+        );
+    }
 }

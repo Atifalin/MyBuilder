@@ -64,6 +64,20 @@ func _initialize() -> void:
 			failures.append("append_from_file failed for %s: %s" % [c["file"], error_string(err)])
 			continue
 		var scene := doc.generate_scene(state)
+		# gen 3: a translucent water surface mesh per chunk that has one.
+		if c.has("water"):
+			var wpath := base_dir.path_join(c["water"]["file"])
+			var wdoc := GLTFDocument.new()
+			var wstate := GLTFState.new()
+			if wdoc.append_from_file(wpath, wstate) == OK:
+				var wscene := wdoc.generate_scene(wstate)
+				var wmat := StandardMaterial3D.new()
+				wmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				wmat.albedo_color = Color(0.1, 0.35, 0.65, 0.6)
+				wmat.roughness = 0.1
+				wscene.set_meta("water", true)
+				_apply_override(wscene, wmat)
+				world_root.add_child(wscene)
 		if gen2 and c.has("splat"):
 			apply_splat(scene, base_dir.path_join(c["splat"]["file"]), shader_path, c["file"], want_tex if not c.has("region") else 0)
 		else:
@@ -144,6 +158,12 @@ func apply_splat(node: Node, png_path: String, shader_path: String, file: String
 					0 if t == null else t.get_height(), want])
 	for ch in node.get_children():
 		apply_splat(ch, png_path, shader_path, file, want)
+
+func _apply_override(node: Node, mat: Material) -> void:
+	if node is MeshInstance3D:
+		node.material_override = mat
+	for ch in node.get_children():
+		_apply_override(ch, mat)
 
 func subtree_aabb(node: Node) -> AABB:
 	# Returns the AABB in `node`'s local space. Each child's own transform

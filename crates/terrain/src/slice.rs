@@ -24,6 +24,16 @@ pub struct ChunkSlice {
     pub north: Option<Vec<f64>>,
     /// (ni*nj) coast distances over the node range.
     pub coast: Vec<f64>,
+    /// Gen >= 3: min(coast, EDT distance to water) per node.
+    /// Empty for gen <= 2.
+    pub water_dist: Vec<f64>,
+    /// Gen >= 3: wetness mask per node — the raw water plane, wet
+    /// nodes carry their level, dry the NO_WATER sentinel.
+    /// Empty for gen <= 2.
+    pub water: Vec<f64>,
+    /// Gen >= 3: water surface level per node — wet nodes' own level,
+    /// dry nodes' nearest-wet level (mesh edges don't sag).
+    pub water_surface: Vec<f64>,
 }
 
 impl ChunkSlice {
@@ -72,6 +82,33 @@ impl ChunkSlice {
     pub fn coast_at(&self, i: usize, j: usize) -> f64 {
         self.coast[(j - self.j0) * self.ni + (i - self.i0)]
     }
+
+    /// Distance-to-water for splat weights: gen >= 3 gives min(coast,
+    /// river/lake distance); older gens return the raw coast distance.
+    pub fn water_dist_at(&self, i: usize, j: usize) -> f64 {
+        if self.water_dist.is_empty() {
+            self.coast_at(i, j)
+        } else {
+            self.water_dist[(j - self.j0) * self.ni + (i - self.i0)]
+        }
+    }
+
+    /// Wetness: true when the node has its own water (river/lake).
+    pub fn is_wet(&self, i: usize, j: usize) -> bool {
+        !self.water.is_empty()
+            && self.water[(j - self.j0) * self.ni + (i - self.i0)] != crate::hydrology::NO_WATER
+    }
+
+    /// Water surface level for the MESH vertex at (i, j): the node's
+    /// own level when wet, else the nearest wet node's level so the
+    /// mesh edge doesn't sag. NO_WATER only when no wet node exists.
+    pub fn water_at(&self, i: usize, j: usize) -> f64 {
+        if self.water_surface.is_empty() {
+            crate::hydrology::NO_WATER
+        } else {
+            self.water_surface[(j - self.j0) * self.ni + (i - self.i0)]
+        }
+    }
 }
 
 /// Build the slice bytes for chunk (cx, cz) from the decoded height
@@ -85,6 +122,7 @@ pub fn encode_chunk_slice(
     cells_per_chunk: usize,
     cx: usize,
     cz: usize,
+    water: Option<(&[f64], &[f64], &[f64])>,
 ) -> Vec<u8> {
     let i0 = cx * cells_per_chunk;
     let j0 = cz * cells_per_chunk;
@@ -139,6 +177,28 @@ pub fn encode_chunk_slice(
             out.extend_from_slice(&coast[j * grid.nx + i].to_le_bytes());
         }
     }
+    // Trailing flag: 1 = water_dist + water_surface planes follow.
+    match water {
+        Some((wd, ws, wraw)) => {
+            out.push(1);
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.extend_from_slice(&wd[j * grid.nx + i].to_le_bytes());
+                }
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.extend_from_slice(&ws[j * grid.nx + i].to_le_bytes());
+                }
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.extend_from_slice(&wraw[j * grid.nx + i].to_le_bytes());
+                }
+            }
+        }
+        None => out.push(0),
+    }
     out
 }
 
@@ -160,6 +220,17 @@ pub fn decode_chunk_slice(b: &[u8]) -> ChunkSlice {
     let south = (flags & 4 != 0).then(|| take(ni, &mut o));
     let north = (flags & 8 != 0).then(|| take(ni, &mut o));
     let coast = take(ni * nj, &mut o);
+    // Encode order is (water_dist, water_surface, water-raw).
+    let (water_dist, water_surface, water) = if o < b.len() && b[o] == 1 {
+        o += 1;
+        (
+            take(ni * nj, &mut o),
+            take(ni * nj, &mut o),
+            take(ni * nj, &mut o),
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
     ChunkSlice {
         i0,
         j0,
@@ -171,6 +242,9 @@ pub fn decode_chunk_slice(b: &[u8]) -> ChunkSlice {
         south,
         north,
         coast,
+        water_dist,
+        water,
+        water_surface,
     }
 }
 
@@ -190,6 +264,9 @@ pub struct RegionSlice {
     /// Gen >= 3: the hydrology carve delta (final_h - h) window.
     /// Empty for earlier generators.
     pub delta: Vec<f64>,
+    /// Gen >= 3: min(coast, EDT to river/lake) per window node.
+    /// Empty for gen <= 2.
+    pub water_dist: Vec<f64>,
 }
 
 impl RegionSlice {
@@ -228,6 +305,7 @@ pub fn encode_region_slice(
     cx: usize,
     cz: usize,
     delta: Option<&[f64]>,
+    water_dist: Option<&[f64]>,
 ) -> Vec<u8> {
     let m = region_margin(mesh_step);
     let i0 = cx * cells_per_chunk;
@@ -263,6 +341,18 @@ pub fn encode_region_slice(
         }
         None => out.push(0),
     }
+    // Second trailing flag: water_dist window.
+    match water_dist {
+        Some(w) => {
+            out.push(1);
+            for j in wj0..=wj1 {
+                for i in wi0..=wi1 {
+                    out.extend_from_slice(&gat(i, j, w).to_le_bytes());
+                }
+            }
+        }
+        None => out.push(0),
+    }
     out
 }
 
@@ -287,6 +377,15 @@ pub fn decode_region_slice(b: &[u8]) -> RegionSlice {
         coast: take(&mut o),
         mountain: take(&mut o),
         delta: {
+            if b[o] == 1 {
+                o += 1;
+                take(&mut o)
+            } else {
+                o += 1;
+                Vec::new()
+            }
+        },
+        water_dist: {
             if b[o] == 1 {
                 o += 1;
                 take(&mut o)

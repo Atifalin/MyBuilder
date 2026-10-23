@@ -740,6 +740,7 @@ fn sliced_region_chunk_matches_full_region() {
             cx,
             cz,
             None,
+            None,
         );
         let rs = mb_terrain::slice::decode_region_slice(&slice);
         let art = mb_terrain::region_slice::run_region_chunk(
@@ -760,7 +761,7 @@ fn sliced_region_chunk_matches_full_region() {
         );
     }
     // And the coarse chunk slice path matches chunk_mesh + glb.
-    let cs = mb_terrain::slice::encode_chunk_slice(&g, &hf, &dist.coast, 128, 0, 0);
+    let cs = mb_terrain::slice::encode_chunk_slice(&g, &hf, &dist.coast, 128, 0, 0, None);
     let cdec = mb_terrain::slice::decode_chunk_slice(&cs);
     let h_at = |i: usize, j: usize| cdec.h_at(i, j);
     let n_at =

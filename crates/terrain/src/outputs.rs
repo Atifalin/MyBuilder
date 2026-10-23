@@ -309,6 +309,42 @@ pub fn terrain_color(h: f64, shade: f64, h_min: f64, h_max: f64, sea: f64) -> (u
     )
 }
 
+/// hillshade variant that paints river/lake nodes blue (gen >= 3).
+/// `water` is a u8 plane, nonzero = water node.
+pub fn hillshade_water_png(grid: &Grid, hf: &HeightField, sea: f64, water: &[u8]) -> Vec<u8> {
+    const L: [f64; 3] = [0.5, std::f64::consts::FRAC_1_SQRT_2, 0.5];
+    let pxw = ((grid.nx - 1) as f64 * grid.cell / 2.0) as usize;
+    let pxd = ((grid.nz - 1) as f64 * grid.cell / 2.0) as usize;
+    let norms = normals(grid, hf);
+    let mut rgb = Vec::with_capacity(pxw * pxd * 3);
+    for pj in 0..pxd {
+        for pi in 0..pxw {
+            let x = grid.origin_x + (pi as f64 + 0.5) * 2.0;
+            let z = grid.origin_z + (pj as f64 + 0.5) * 2.0;
+            let i = (((x - grid.origin_x) / grid.cell).round() as usize).min(grid.nx - 1);
+            let j = (((z - grid.origin_z) / grid.cell).round() as usize).min(grid.nz - 1);
+            let idx = j * grid.nx + i;
+            if water[idx] != 0 {
+                rgb.extend_from_slice(&[40, 110, 210]);
+                continue;
+            }
+            let n = norms[idx];
+            let shade =
+                (n[0] as f64 * L[0] + n[1] as f64 * L[1] + n[2] as f64 * L[2]).clamp(0.0, 1.0);
+            let (r, g, b) = terrain_color(hf.h[idx], shade, hf.h_min, hf.h_max, sea);
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, pxw as u32, pxd as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().expect("png header");
+    w.write_image_data(&rgb).expect("png data");
+    drop(w);
+    out
+}
+
 fn hillshade_png(grid: &Grid, hf: &HeightField, sea: f64) -> Vec<u8> {
     const L: [f64; 3] = [0.5, std::f64::consts::FRAC_1_SQRT_2, 0.5]; // normalized
     let pxw = ((grid.nx - 1) as f64 * grid.cell / 2.0) as usize;

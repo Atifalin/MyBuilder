@@ -197,7 +197,28 @@ fn event_stream_full_and_incremental() {
     for e in &ev {
         let j = serde_json::to_string(e).unwrap();
         let back: BuildEvent = serde_json::from_str(&j).unwrap();
-        assert_eq!(*e, back);
+        // f64 ms timings can differ by 1 ULP after the round-trip;
+        // compare everything else exactly, ms with epsilon.
+        match (e, &back) {
+            (
+                BuildEvent::StageFinished {
+                    stage: a,
+                    group: g,
+                    executed: x,
+                    ms: m,
+                },
+                BuildEvent::StageFinished {
+                    stage: a2,
+                    group: g2,
+                    executed: x2,
+                    ms: m2,
+                },
+            ) => {
+                assert_eq!((a, g, x), (a2, g2, x2));
+                assert!((m - m2).abs() < 1e-9, "ms drift {m} vs {m2}");
+            }
+            _ => assert_eq!(*e, back),
+        }
     }
     // Incremental: all stages cached, 0 files written.
     let mut ev2 = Vec::new();

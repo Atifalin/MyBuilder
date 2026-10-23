@@ -318,6 +318,17 @@ fn collect_outputs(
                     format!("exports/terrain/splat/chunk_{cx}_{cz}.png"),
                     tail[4..4 + sl].to_vec(),
                 ));
+                // gen 3 water tail: u32 len + GLB (0-len => dry chunk)
+                let wl = &tail[4 + sl..];
+                if wl.len() >= 4 {
+                    let n = u32::from_le_bytes(wl[0..4].try_into().unwrap()) as usize;
+                    if n > 0 {
+                        files.push((
+                            format!("exports/terrain/water/chunk_{cx}_{cz}.glb"),
+                            wl[4..4 + n].to_vec(),
+                        ));
+                    }
+                }
             }
         }
     }

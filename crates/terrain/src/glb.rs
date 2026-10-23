@@ -61,6 +61,52 @@ fn accessors(mesh: &ChunkMesh) -> serde_json::Value {
 /// Serialize a chunk mesh to GLB bytes. `name` is the node name and
 /// `extras` the per-chunk metadata (id, cx, cz).
 pub fn chunk_glb(mesh: &ChunkMesh, name: &str, id_hex: &str, cx: usize, cz: usize) -> Vec<u8> {
+    glb_impl(
+        mesh,
+        name,
+        id_hex,
+        cx,
+        cz,
+        &serde_json::json!({
+            "name": "terrain",
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                "metallicFactor": 0.0,
+                "roughnessFactor": 1.0,
+            }
+        }),
+    )
+}
+
+/// Water surface chunk: translucent blue PBR, alphaMode BLEND.
+pub fn water_glb(mesh: &ChunkMesh, name: &str, id_hex: &str, cx: usize, cz: usize) -> Vec<u8> {
+    glb_impl(
+        mesh,
+        name,
+        id_hex,
+        cx,
+        cz,
+        &serde_json::json!({
+            "name": "water",
+            "alphaMode": "BLEND",
+            "doubleSided": true,
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [0.10, 0.35, 0.65, 0.6],
+                "metallicFactor": 0.0,
+                "roughnessFactor": 0.1,
+            }
+        }),
+    )
+}
+
+fn glb_impl(
+    mesh: &ChunkMesh,
+    name: &str,
+    id_hex: &str,
+    cx: usize,
+    cz: usize,
+    material: &serde_json::Value,
+) -> Vec<u8> {
     // --- BIN payload: positions | normals | uvs | colors | indices ---
     let mut bin = Vec::new();
     let pos_off = bin.len();
@@ -129,14 +175,7 @@ pub fn chunk_glb(mesh: &ChunkMesh, name: &str, id_hex: &str, cx: usize, cz: usiz
                 "mode": 4,
             }]
         }],
-        "materials": [{
-            "name": "terrain",
-            "pbrMetallicRoughness": {
-                "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
-                "metallicFactor": 0.0,
-                "roughnessFactor": 1.0,
-            }
-        }],
+        "materials": [material],
         "buffers": [{ "byteLength": bin.len() }],
         "bufferViews": bviews(&[
             (pos_off, mesh.positions.len() * 12),

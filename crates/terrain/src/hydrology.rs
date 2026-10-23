@@ -49,6 +49,13 @@ pub struct Hydro {
     pub recv: Vec<usize>,
     /// River bed heights (rivers only).
     pub bed: Vec<f64>,
+    /// min(coast, distance to the nearest river/lake node) in meters —
+    /// the splat "sand near water" input for gen >= 3.
+    pub water_dist: Vec<f64>,
+    /// Water level for every node: wet nodes carry their own level,
+    /// dry nodes the nearest wet node's level (so water mesh edges
+    /// don't sag). NO_WATER where no wet node exists at all.
+    pub water_surface: Vec<f64>,
 }
 
 const N8: [(isize, isize); 8] = [
@@ -68,6 +75,7 @@ pub fn run(
     masks_land: &[u8],
     sea: f64,
     t: &HydrologySection,
+    coast: &[f64],
     poll: &dyn Fn() -> bool,
 ) -> Hydro {
     let (nx, nz, cell) = (grid.nx, grid.nz, grid.cell);
@@ -297,13 +305,51 @@ pub fn run(
     Hydro {
         final_h,
         delta,
-        water,
-        river,
+        water: water.clone(),
+        river: river.clone(),
         lake: (0..n).map(|c| is_lake(c) as u8).collect(),
         acc,
         lakes,
         recv,
         bed,
+        water_dist: {
+            // wet mask = river OR confirmed lake
+            let mut wet = vec![0u8; n];
+            for c in 0..n {
+                if river[c] == 1 || is_lake(c) {
+                    wet[c] = 1;
+                }
+            }
+            let (d_cells, _sites) = nearest_site_edt(&wet, nx, nz);
+            (0..n)
+                .map(|c| {
+                    let dw = d_cells[c] * cell;
+                    coast[c].min(dw)
+                })
+                .collect()
+        },
+        water_surface: {
+            // Wet nodes keep their level; dry nodes take the nearest
+            // wet node's level so water mesh borders don't sag.
+            let mut wet = vec![0u8; n];
+            for c in 0..n {
+                if water[c] != NO_WATER {
+                    wet[c] = 1;
+                }
+            }
+            let (_d, sites) = nearest_site_edt(&wet, nx, nz);
+            (0..n)
+                .map(|c| {
+                    if wet[c] == 1 {
+                        water[c]
+                    } else if sites[c] != usize::MAX {
+                        water[sites[c]]
+                    } else {
+                        NO_WATER
+                    }
+                })
+                .collect()
+        },
     }
 }
 
@@ -318,6 +364,8 @@ fn empty(n: usize) -> Hydro {
         lakes: vec![],
         recv: vec![usize::MAX; n],
         bed: vec![0.0; n],
+        water_dist: vec![0.0; n],
+        water_surface: vec![0.0; n],
     }
 }
 

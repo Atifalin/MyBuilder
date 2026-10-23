@@ -566,7 +566,8 @@ pub const CHUNK_HEADER: usize = 8;
 ///
 /// Artifact layout (all LE, f64 unless noted):
 ///   nx u64, nz u64, cell f64,
-///   final_h, delta, water (f64::NEG_INFINITY = no water), acc, each [nx*nz] f64;
+///   final_h, coast, delta, water (f64::NEG_INFINITY = no water), acc,
+///   water_dist, water_surface, each [nx*nz] f64;
 ///   river[nx*nz] u8, lake[nx*nz] u8,
 ///   lakes: u64 count, then (id u32, level f64, area f64) each.
 pub struct HydrologyStage {
@@ -597,6 +598,8 @@ pub struct HydroPlanes {
     pub river: Vec<u8>,
     pub lake: Vec<u8>,
     pub acc: Vec<f64>,
+    pub water_dist: Vec<f64>,
+    pub water_surface: Vec<f64>,
     pub lakes: Vec<(u32, f64, f64)>,
 }
 pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
@@ -614,6 +617,8 @@ pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
     let delta = get_f64s(b, &mut o, n);
     let water = get_f64s(b, &mut o, n);
     let acc = get_f64s(b, &mut o, n);
+    let water_dist = get_f64s(b, &mut o, n);
+    let water_surface = get_f64s(b, &mut o, n);
     let river = b[o..o + n].to_vec();
     o += n;
     let lake = b[o..o + n].to_vec();
@@ -640,6 +645,8 @@ pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
             river,
             lake,
             acc,
+            water_dist,
+            water_surface,
             lakes,
         },
     )
@@ -663,7 +670,7 @@ impl Stage for HydrologyStage {
         ))
     }
     fn run(&self, inputs: &[&Artifact], _seed: u64, ctx: &RunCtx) -> Result<Artifact, Cancelled> {
-        let (nx, nz, _hmin, _hmax, h, _coast) = decode_height(&inputs[0].bytes);
+        let (nx, nz, _hmin, _hmax, h, coast) = decode_height(&inputs[0].bytes);
         let (_g, masks) = decode_masks(&inputs[1].bytes);
         let hydro = crate::hydrology::run(
             &self.grid,
@@ -671,6 +678,7 @@ impl Stage for HydrologyStage {
             &masks.land,
             self.world.sea_level_m,
             &self.world.hydrology,
+            &coast,
             &|| ctx.tick(),
         );
         let n = nx * nz;
@@ -687,10 +695,17 @@ impl Stage for HydrologyStage {
         b.extend_from_slice(&(nz as u64).to_le_bytes());
         b.extend_from_slice(&h_min.to_le_bytes());
         b.extend_from_slice(&h_max.to_le_bytes());
-        for v in hydro.final_h.iter().chain(&_coast) {
+        for v in hydro.final_h.iter().chain(&coast) {
             b.extend_from_slice(&v.to_le_bytes());
         }
-        for v in hydro.delta.iter().chain(&hydro.water).chain(&hydro.acc) {
+        for v in hydro
+            .delta
+            .iter()
+            .chain(&hydro.water)
+            .chain(&hydro.acc)
+            .chain(&hydro.water_dist)
+            .chain(&hydro.water_surface)
+        {
             b.extend_from_slice(&v.to_le_bytes());
         }
         b.extend_from_slice(&hydro.river);
@@ -799,6 +814,21 @@ impl Stage for LayersStage {
                     f32s.extend_from_slice(&(*a as f32).to_le_bytes());
                 }
                 bundle.files.push(("layers/flow_acc.f32".to_string(), f32s));
+                // Water-tinted hillshade: river|lake nodes painted blue.
+                let mut wmask = hp.river.clone();
+                for (i, v) in hp.lake.iter().enumerate() {
+                    wmask[i] |= v;
+                }
+                for (p, bytes) in bundle.files.iter_mut() {
+                    if p == "previews/hillshade.png" {
+                        *bytes = outputs::hillshade_water_png(
+                            &self.grid,
+                            &hf,
+                            self.world.sea_level_m,
+                            &wmask,
+                        );
+                    }
+                }
                 // lakes list in layers.json
                 for (p, bytes) in bundle.files.iter_mut() {
                     if p == "layers/layers.json" {
@@ -894,7 +924,23 @@ impl mb_pipeline::SlicedStage for ChunkStage {
         };
         let _ = (nx, nz);
         let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
-        crate::slice::encode_chunk_slice(&self.grid, &hf, &coast, cells_per_chunk, self.cx, self.cz)
+        let water: Option<(Vec<f64>, Vec<f64>, Vec<f64>)> = if self.project.generator_version >= 3 {
+            let hp = decode_hydro(&inputs[0].bytes).3;
+            Some((hp.water_dist, hp.water_surface, hp.water))
+        } else {
+            None
+        };
+        crate::slice::encode_chunk_slice(
+            &self.grid,
+            &hf,
+            &coast,
+            cells_per_chunk,
+            self.cx,
+            self.cz,
+            water
+                .as_ref()
+                .map(|(a, b, c)| (a.as_slice(), b.as_slice(), c.as_slice())),
+        )
     }
     fn run(&self, slice: &[u8], _seed: u64, _ctx: &RunCtx) -> Result<Artifact, Cancelled> {
         Ok({
@@ -906,7 +952,7 @@ impl mb_pipeline::SlicedStage for ChunkStage {
             let h_at = |i: usize, j: usize| cs.h_at(i, j);
             let normal_at =
                 |i: usize, j: usize| crate::mesh::node_normal(&h_at, i, j, gi_hi, gj_hi, cell);
-            let coast_at = |i: usize, j: usize| cs.coast_at(i, j);
+            let coast_at = |i: usize, j: usize| cs.water_dist_at(i, j);
             let gen2 = self.project.generator_version >= 2;
             let n_texels = cells_per_chunk + 1;
             let tex2 = if gen2 {
@@ -963,7 +1009,7 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                         let w = crate::splat_weights(
                             cs.h_at(gi, gj),
                             g,
-                            coast_at(gi, gj),
+                            cs.water_dist_at(gi, gj),
                             self.world.sea_level_m,
                             self.world.profile.snow_line_m,
                             &self.world.texturing,
@@ -976,6 +1022,81 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                 let png = crate::outputs::rgba_png(&rgba, n_texels as u32, n_texels as u32);
                 out.extend_from_slice(&(png.len() as u32).to_le_bytes());
                 out.extend_from_slice(&png);
+            }
+            if self.project.generator_version >= 3 {
+                // Water mesh tail: u32 len + GLB (empty vec when the
+                // chunk has no wet nodes). Vertices at the mesh stride;
+                // y = the water surface level — wet nodes' own level,
+                // dry nodes' nearest-wet level so edges don't sag.
+                // Triangles only when all three vertices are wet.
+                let _no_w = crate::hydrology::NO_WATER;
+
+                let side = cells_per_chunk / step + 1;
+                let mut wm = crate::mesh::ChunkMesh {
+                    positions: Vec::new(),
+                    normals: Vec::new(),
+                    uvs: Vec::new(),
+                    colors: Vec::new(),
+                    uv2: Vec::new(),
+                    indices: Vec::new(),
+                    origin: mesh.origin,
+                    vertex_count: 0,
+                    triangle_count: 0,
+                };
+                let ox = self.grid.x(self.cx * cells_per_chunk);
+                let oz = self.grid.z(self.cz * cells_per_chunk);
+                let mut vidx = vec![u32::MAX; side * side];
+                for vj in 0..side {
+                    for vi in 0..side {
+                        let (gi, gj) = (
+                            self.cx * cells_per_chunk + vi * step,
+                            self.cz * cells_per_chunk + vj * step,
+                        );
+                        if !cs.is_wet(gi, gj) {
+                            continue;
+                        }
+                        let level = cs.water_at(gi, gj);
+                        vidx[vj * side + vi] = wm.positions.len() as u32;
+                        wm.positions.push([
+                            (self.grid.x(gi) - ox) as f32,
+                            level as f32,
+                            (self.grid.z(gj) - oz) as f32,
+                        ]);
+                        wm.normals.push([0.0, 1.0, 0.0]);
+                        wm.uvs
+                            .push([self.grid.x(gi) as f32, self.grid.z(gj) as f32]);
+                        wm.colors.push([0.1, 0.35, 0.65]);
+                    }
+                }
+                for vj in 0..side - 1 {
+                    for vi in 0..side - 1 {
+                        let a = vidx[vj * side + vi];
+                        let b = vidx[vj * side + vi + 1];
+                        let c = vidx[(vj + 1) * side + vi];
+                        let d = vidx[(vj + 1) * side + vi + 1];
+                        if a != u32::MAX && c != u32::MAX && b != u32::MAX {
+                            wm.indices.extend_from_slice(&[a, c, b]);
+                        }
+                        if b != u32::MAX && c != u32::MAX && d != u32::MAX {
+                            wm.indices.extend_from_slice(&[b, c, d]);
+                        }
+                    }
+                }
+                wm.vertex_count = wm.positions.len();
+                wm.triangle_count = wm.indices.len() / 3;
+                let wglb = if wm.vertex_count == 0 {
+                    Vec::new()
+                } else {
+                    crate::glb::water_glb(
+                        &wm,
+                        &format!("water_{}_{}", self.cx, self.cz),
+                        &id.to_string(),
+                        self.cx,
+                        self.cz,
+                    )
+                };
+                out.extend_from_slice(&(wglb.len() as u32).to_le_bytes());
+                out.extend_from_slice(&wglb);
             }
             Artifact::new(out)
         })
@@ -1062,11 +1183,13 @@ impl mb_pipeline::SlicedStage for RegionChunkStage {
         };
         let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
         let step = self.world.export.mesh_step_cells as usize;
-        let delta: Option<Vec<f64>> = if self.project.generator_version >= 3 {
-            Some(decode_hydro(&inputs[0].bytes).3.delta)
-        } else {
-            None
-        };
+        let (delta, wd): (Option<Vec<f64>>, Option<Vec<f64>>) =
+            if self.project.generator_version >= 3 {
+                let hp = decode_hydro(&inputs[0].bytes).3;
+                (Some(hp.delta), Some(hp.water_dist))
+            } else {
+                (None, None)
+            };
         crate::slice::encode_region_slice(
             &self.grid,
             &hf,
@@ -1077,6 +1200,7 @@ impl mb_pipeline::SlicedStage for RegionChunkStage {
             self.cx,
             self.cz,
             delta.as_deref(),
+            wd.as_deref(),
         )
     }
     fn run(&self, slice: &[u8], _seed: u64, ctx: &RunCtx) -> Result<Artifact, Cancelled> {
@@ -1228,6 +1352,17 @@ impl Stage for ManifestStage {
                             "file": format!("splat/chunk_{cx}_{cz}.png"),
                             "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&tail[4..4 + sl])),
                         });
+                        // gen 3: water GLB tail after the splat.
+                        let wl = &tail[4 + sl..];
+                        if wl.len() >= 4 {
+                            let wn = u32::from_le_bytes(wl[0..4].try_into().unwrap()) as usize;
+                            if wn > 0 {
+                                entry["water"] = serde_json::json!({
+                                    "file": format!("water/chunk_{cx}_{cz}.glb"),
+                                    "blake3": mb_seed::hex_bytes(&mb_seed::hash_bytes(&wl[4..4 + wn])),
+                                });
+                            }
+                        }
                     }
                     chunk_entries.push(entry);
                     total_v += vc;
@@ -1313,7 +1448,21 @@ impl Stage for ManifestStage {
                 total_v,
                 total_t,
             );
-            Artifact::new(bytes)
+            // gen 3: copy the lakes list from layers.json.
+            if self.project.generator_version >= 3 {
+                let mut j: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let layers_json = crate::outputs::FileBundle::decode(&inputs[0].bytes)
+                    .files
+                    .iter()
+                    .find(|(p, _)| p == "layers/layers.json")
+                    .map(|(_, b)| serde_json::from_slice::<serde_json::Value>(b).unwrap());
+                if let Some(lj) = layers_json {
+                    j["lakes"] = lj["lakes"].clone();
+                }
+                Artifact::new(serde_json::to_vec(&j).unwrap())
+            } else {
+                Artifact::new(bytes)
+            }
         })
     }
 }

@@ -41,6 +41,8 @@ pub struct PreviewSource {
     h: Vec<f64>,
     #[allow(dead_code)]
     land: Vec<u8>,
+    /// gen >= 3: river|lake mask; empty before gen 3.
+    water: Vec<u8>,
 }
 
 impl PreviewSource {
@@ -81,7 +83,31 @@ impl PreviewSource {
             h_max,
             h,
             land,
+            water: {
+                // Optional gen-3 layers; absence = no water tint.
+                let r = std::fs::read(dir.join("layers/river.u8")).unwrap_or_default();
+                let l = std::fs::read(dir.join("layers/lake.u8")).unwrap_or_default();
+                if r.len() == l.len() && !r.is_empty() {
+                    r.iter().zip(&l).map(|(a, b)| a | b).collect()
+                } else {
+                    Vec::new()
+                }
+            },
         })
+    }
+
+    /// Nearest-node water flag at world (x, z); false when no mask.
+    fn water_at(&self, x: f64, z: f64) -> bool {
+        if self.water.is_empty() {
+            return false;
+        }
+        let i = ((x - self.origin_x) / self.cell)
+            .round()
+            .clamp(0.0, (self.nx - 1) as f64) as usize;
+        let j = ((z - self.origin_z) / self.cell)
+            .round()
+            .clamp(0.0, (self.nz - 1) as f64) as usize;
+        self.water[j * self.nx + i] != 0
     }
 
     fn sample(&self, x: f64, z: f64) -> f64 {
@@ -131,13 +157,19 @@ impl PreviewSource {
                 let dz = (self.sample(x, z + step) - self.sample(x, z - step)) / (2.0 * step);
                 let inv = 1.0 / (dx * dx + dz * dz + 1.0).sqrt();
                 let n = (-dx * inv, inv, -dz * inv);
-                let (r, g, b) = mb_terrain::outputs::terrain_color(
-                    h,
-                    (n.0 * 0.5 + n.1 * std::f64::consts::FRAC_1_SQRT_2 + n.2 * 0.5).clamp(0.0, 1.0),
-                    self.h_min,
-                    self.h_max,
-                    self.sea,
-                );
+                let (r, g, b) = if self.water_at(x, z) {
+                    // gen >= 3: river/lake nodes painted blue.
+                    (40, 110, 210)
+                } else {
+                    mb_terrain::outputs::terrain_color(
+                        h,
+                        (n.0 * 0.5 + n.1 * std::f64::consts::FRAC_1_SQRT_2 + n.2 * 0.5)
+                            .clamp(0.0, 1.0),
+                        self.h_min,
+                        self.h_max,
+                        self.sea,
+                    )
+                };
                 rgba.extend_from_slice(&[r, g, b, 255]);
             }
         }

@@ -739,6 +739,7 @@ fn sliced_region_chunk_matches_full_region() {
             4,
             cx,
             cz,
+            None,
         );
         let rs = mb_terrain::slice::decode_region_slice(&slice);
         let art = mb_terrain::region_slice::run_region_chunk(

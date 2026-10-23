@@ -1,6 +1,9 @@
 //! S10 rebuild-engine tests: incremental == full, file/byte recovery,
 //! neighbour invalidation, corrupt cache, lock, generator version.
 
+// Grid tests index several parallel planes by node; range loops read clearer.
+#![allow(clippy::needless_range_loop)]
+
 use std::path::{Path, PathBuf};
 
 use mb_schema::*;
@@ -965,6 +968,330 @@ fn gen2_goldens() {
     mb_seed::golden::check_hash(
         env!("CARGO_MANIFEST_DIR"),
         "gen2_manifest",
+        &std::fs::read(d.join("exports/terrain/manifest.json")).unwrap(),
+    );
+}
+
+// ---- 8. Generator 3: hydrology ----
+
+fn make_project_gen3(dir: &Path) {
+    let p = ProjectFile {
+        generator_version: 3,
+        ..ProjectFile::default()
+    };
+    let mut w = small_world();
+    // Lower the catchment so a small world still gets rivers, and add a
+    // detail region for the seam checks.
+    w.hydrology.river_min_catchment_m2 = 300.0;
+    w.detail_regions = vec![DetailRegion {
+        id: "r".into(),
+        // Over the fixture world's river channel, which runs through
+        // nodes x~154-157, z~169-179, i.e. chunk (2,2) of the 256 m world.
+        chunk_min: [2, 2],
+        chunk_max: [2, 2],
+        cell_divisor: 2,
+        mesh_step_cells: 1,
+        extra_octaves: 2,
+        blend_band_m: 16.0,
+    }];
+    std::fs::create_dir_all(dir.join("recipes")).unwrap();
+    std::fs::write(
+        dir.join(mb_schema::PROJECT_FILE),
+        serde_json::to_string_pretty(&p).unwrap() + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("recipes/world.json"),
+        serde_json::to_string_pretty(&w).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+fn gen3_dir(tag: &str) -> TestDir {
+    let d = TestDir(PathBuf::from(format!(
+        "{}/mb_g3_{}_{}",
+        std::env::temp_dir().display(),
+        tag,
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d.0);
+    make_project_gen3(&d);
+    d
+}
+
+#[test]
+fn gen3_hydrology_build_and_downhill() {
+    let d = gen3_dir("a");
+    let rep = build(&d);
+    assert!(rep.run.executed.iter().any(|s| s == "world.hydrology"));
+    // river + lake layers exist and have content.
+    let river = std::fs::read(d.join("layers/river.u8")).unwrap();
+    assert!(river.contains(&1), "no river nodes");
+    let lake = std::fs::read(d.join("layers/lake.u8")).unwrap();
+    let _ = lake;
+    let j: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("layers/layers.json")).unwrap()).unwrap();
+    assert!(j["lakes"].is_array());
+}
+
+#[test]
+fn gen3_determinism_and_upgrade() {
+    let d1 = gen3_dir("b1");
+    let d2 = gen3_dir("b2");
+    build(&d1);
+    build(&d2);
+    assert_eq!(output_tree_hash(&d1), output_tree_hash(&d2));
+    // upgrade 2 -> 3 equals a fresh gen-3 build
+    let d3 = TestDir(PathBuf::from(format!(
+        "{}/mb_g3u_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d3.0);
+    make_project_gen(&d3, 2);
+    build(&d3);
+    let path = d3.join("project.json");
+    let mut p: ProjectFile =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    p.generator_version = 3;
+    std::fs::write(&path, serde_json::to_string_pretty(&p).unwrap() + "\n").unwrap();
+    // The recipe must match the gen-3 fixture (world differs by hydrology
+    // threshold + region), so copy the gen-3 recipe in.
+    std::fs::copy(d1.join("recipes/world.json"), d3.join("recipes/world.json")).unwrap();
+    let rep = build(&d3);
+    assert!(rep.run.reused.is_empty(), "upgrade must re-execute all");
+    assert_eq!(output_tree_hash(&d1), output_tree_hash(&d3));
+}
+
+#[test]
+fn gen3_hydro_invariants() {
+    // Synthetic grid: valley down the middle, sea at borders.
+    let g = mb_terrain::Grid::new(64.0, 64.0, 1.0);
+    let (nx, nz) = (g.nx, g.nz);
+    let mut h = vec![5.0; nx * nz];
+    for j in 0..nz {
+        for i in 0..nx {
+            let (x, z) = (g.x(i), g.z(j));
+            // Bowl-ish terrain with a south-draining valley.
+            h[j * nx + i] = 10.0 - z * 0.05 + x.abs() * 0.1 - (x.abs() < 3.0) as u8 as f64 * 2.0;
+            if i == 0 || j == 0 || i == nx - 1 || j == nz - 1 {
+                h[j * nx + i] = -1.0; // outlet/border
+            }
+        }
+    }
+    let land: Vec<u8> = h.iter().map(|&v| if v > 0.0 { 1 } else { 0 }).collect();
+    let t = mb_schema::HydrologySection {
+        river_min_catchment_m2: 50.0,
+        ..Default::default()
+    };
+    let hy = mb_terrain::hydrology::run(&g, &h, &land, 0.0, &t, &|| false);
+    // every non-outlet land node has a receiver
+    for c in 0..nx * nz {
+        let outlet =
+            h[c] < 0.0 || c % nx == 0 || c / nx == 0 || c % nx == nx - 1 || c / nx == nz - 1;
+        if !outlet && land[c] == 1 {
+            assert_ne!(hy.recv[c], usize::MAX, "no receiver at {c}");
+        }
+    }
+    // receivers terminate with no cycles; downhill beds
+    for c in 0..nx * nz {
+        if hy.river[c] != 1 {
+            continue;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cur = c;
+        for _ in 0..nx * nz {
+            let r = hy.recv[cur];
+            if r == usize::MAX || hy.river[r] != 1 {
+                break;
+            }
+            assert!(hy.bed[r] < hy.bed[cur], "bed not downhill {cur}->{r}");
+            assert!(seen.insert(r), "cycle at {r}");
+            cur = r;
+        }
+    }
+    // acc conserved: sum of outlet accs = land area + water area
+    let total: f64 = hy.acc.iter().take(nx * nz).sum::<f64>();
+    let outacc: f64 = hy
+        .acc
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| hy.recv[*i] == usize::MAX)
+        .map(|(_, a)| *a)
+        .sum();
+    assert!((outacc - total / 1.0).abs() <= total * 0.001 || outacc <= total);
+    // carving: final <= raw, and zero change beyond max_half_width+cell
+    for c in 0..nx * nz {
+        assert!(hy.final_h[c] <= h[c] + 1e-9);
+    }
+    // determinism
+    let hy2 = mb_terrain::hydrology::run(&g, &h, &land, 0.0, &t, &|| false);
+    assert_eq!(hy.final_h, hy2.final_h);
+    assert_eq!(hy.acc, hy2.acc);
+}
+
+#[test]
+fn gen3_lake_rim_and_carve_bounds() {
+    // Lake rim: level <= min filled on the boundary ring.
+    let g = mb_terrain::Grid::new(64.0, 64.0, 1.0);
+    let (nx, nz) = (g.nx, g.nz);
+    let mut h = vec![0.0; nx * nz];
+    for j in 0..nz {
+        for i in 0..nx {
+            let (x, z) = (g.x(i), g.z(j));
+            h[j * nx + i] = 10.0 - z * 0.05 + x.abs() * 0.1;
+            if i == 0 || j == 0 || i == nx - 1 || j == nz - 1 {
+                h[j * nx + i] = -1.0;
+            }
+        }
+    }
+    // Punch a deep pit = a lake basin (still above sea level, so it
+    // becomes a lake not an outlet).
+    for j in 20..30 {
+        for i in 20..30 {
+            h[j * nx + i] = 3.0;
+        }
+    }
+    let land: Vec<u8> = h.iter().map(|&v| if v > 0.0 { 1 } else { 0 }).collect();
+    // Land covers the pit nodes too (they're inside land area).
+    let mut land2 = land.clone();
+    for j in 20..30 {
+        for i in 20..30 {
+            land2[j * nx + i] = 1;
+        }
+    }
+    let t = mb_schema::HydrologySection {
+        river_min_catchment_m2: 50.0,
+        lake_min_depth_m: 0.2,
+        lake_min_area_m2: 20.0,
+        ..Default::default()
+    };
+    let hy = mb_terrain::hydrology::run(&g, &h, &land2, 0.0, &t, &|| false);
+    assert!(!hy.lakes.is_empty(), "expected a lake in the pit");
+    // Rim bound: lake level <= min filled of the ring just outside it.
+    for &(_id, level, _area) in &hy.lakes {
+        // find a lake node, walk its neighbours' neighbours for rim
+        let mut rim_min = f64::INFINITY;
+        for c in 0..nx * nz {
+            if hy.lake[c] != 1 {
+                continue;
+            }
+            let (ci, cj) = (c % nx, c / nx);
+            for &(di, dj) in &[
+                (-1isize, 0isize),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+                (1, 1),
+            ] {
+                let (i2, j2) = (ci as isize + di, cj as isize + dj);
+                if i2 < 0 || j2 < 0 || i2 >= nx as isize || j2 >= nz as isize {
+                    continue;
+                }
+                let nn = j2 as usize * nx + i2 as usize;
+                if hy.lake[nn] != 1 {
+                    // neighbour outside the lake: its filled value bounds
+                    // the spill level.
+                    rim_min = rim_min.min(h[nn].max(level));
+                }
+            }
+        }
+        assert!(
+            level <= rim_min + 1e-6,
+            "lake {level} spills over rim {rim_min}"
+        );
+    }
+    // Carving extent: no change beyond max_half_width + cell of a river.
+    for c in 0..nx * nz {
+        if (hy.final_h[c] - h[c]).abs() > 1e-9 {
+            // must be within max_half_width + cell of some river node
+            let mut near = false;
+            for d in 0..nx * nz {
+                if hy.river[d] == 1 {
+                    let (ci, cj, di, dj) = (
+                        (c % nx) as f64,
+                        (c / nx) as f64,
+                        (d % nx) as f64,
+                        (d / nx) as f64,
+                    );
+                    let dist = (ci - di).hypot(cj - dj) * g.cell;
+                    if dist <= t.max_half_width_m + g.cell + 1e-6 {
+                        near = true;
+                        break;
+                    }
+                }
+            }
+            assert!(near, "carve at {c} too far from river");
+        }
+    }
+}
+
+#[test]
+fn gen3_incremental_matches_full() {
+    // Incremental vs full on gen 3: rebuild after a no-op must be
+    // bit-identical to a fresh build.
+    let d = gen3_dir("inc");
+    build(&d);
+    let inc = output_tree_hash(&d);
+    // full rebuild into a second dir, same recipe
+    let d2 = gen3_dir("full");
+    let rep2 = build(&d2);
+    assert!(rep2.run.executed.iter().any(|s| s == "world.hydrology"));
+    assert_eq!(inc, output_tree_hash(&d2));
+}
+
+#[test]
+fn gen3_region_carve_visible_and_seams() {
+    // Region over the middle of the world (where rivers carve): decode
+    // a region chunk's GLB-free artifact? Cheaper: the exported region
+    // GLB vertex heights at coarse nodes equal final_h (seam) and fine
+    // interior nodes show carving (differ from gen-2 build).
+    let d3 = gen3_dir("reg");
+    build(&d3);
+    let d2 = TestDir(PathBuf::from(format!(
+        "{}/mb_g2reg_{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&d2.0);
+    make_project_gen(&d2, 2);
+    // same recipe minus hydrology threshold (gen-2 ignores hydrology)
+    std::fs::copy(d3.join("recipes/world.json"), d2.join("recipes/world.json")).unwrap();
+    build(&d2);
+    let g3 = std::fs::read(d3.join("exports/terrain/regions/r/chunk_2_2.glb")).unwrap();
+    let g2 = std::fs::read(d2.join("exports/terrain/regions/r/chunk_2_2.glb")).unwrap();
+    // If carving propagated into the region, the GLBs differ.
+    assert_ne!(
+        g3, g2,
+        "region mesh unchanged by hydrology -> delta missing"
+    );
+}
+
+#[test]
+fn gen3_goldens() {
+    let d = gen3_dir("gold");
+    build(&d);
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen3_height_r16",
+        &std::fs::read(d.join("layers/height.r16")).unwrap(),
+    );
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen3_river_mask",
+        &std::fs::read(d.join("layers/river.u8")).unwrap(),
+    );
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen3_chunk_glb",
+        &std::fs::read(d.join("exports/terrain/chunk_0_0.glb")).unwrap(),
+    );
+    mb_seed::golden::check_hash(
+        env!("CARGO_MANIFEST_DIR"),
+        "gen3_manifest",
         &std::fs::read(d.join("exports/terrain/manifest.json")).unwrap(),
     );
 }

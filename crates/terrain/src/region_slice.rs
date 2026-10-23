@@ -85,16 +85,14 @@ pub fn run_region_chunk(
             let hfinal = if wt <= 0.0 {
                 hc
             } else {
-                let d = ctx.coast_at(x - (ox - grid.x(cx * cells_per_chunk)), z) + 0.0; // placeholder; computed properly below
-                let _ = d;
+                // placeholder; computed properly below
                 // Bilinear inside the VIRTUAL grid uses local coords: the
                 // HeightCtx already holds the virtual grid, so pass the
                 // world point verbatim — window-local mapping is inside.
-                let d = ctx.coast_at(
+                let _d = ctx.coast_at(
                     x - grid.origin_x + vg.origin_x - (grid.x(wi0) - vg.origin_x),
                     z,
                 );
-                let _ = d;
                 // Correct world-space call: virtual grid origin equals
                 // world x(wi0), so world x maps to window index i - wi0.
                 // height_at/coast_at expect LOCAL (window-grid) coords.
@@ -113,7 +111,14 @@ pub fn run_region_chunk(
                     )
                     / norm_n;
                 let htrue = ctx.height_at(lx, lz) + detail;
-                hc + wt * (htrue - hc)
+                // gen >= 3: add the carve delta so interiors keep the
+                // carved channels (delta is 0 away from rivers).
+                let dc = if rs.delta.is_empty() {
+                    0.0
+                } else {
+                    crate::bilinear(&vg, &rs.delta, lx, lz)
+                };
+                hc + wt * (htrue + dc - hc)
             };
             h[idx] = hfinal;
             w[idx] = wt;

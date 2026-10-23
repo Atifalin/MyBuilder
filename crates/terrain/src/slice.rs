@@ -187,6 +187,9 @@ pub struct RegionSlice {
     pub heights: Vec<f64>,
     pub coast: Vec<f64>,
     pub mountain: Vec<f64>,
+    /// Gen >= 3: the hydrology carve delta (final_h - h) window.
+    /// Empty for earlier generators.
+    pub delta: Vec<f64>,
 }
 
 impl RegionSlice {
@@ -224,6 +227,7 @@ pub fn encode_region_slice(
     mesh_step: usize,
     cx: usize,
     cz: usize,
+    delta: Option<&[f64]>,
 ) -> Vec<u8> {
     let m = region_margin(mesh_step);
     let i0 = cx * cells_per_chunk;
@@ -246,6 +250,18 @@ pub fn encode_region_slice(
                 out.extend_from_slice(&gat(i, j, plane).to_le_bytes());
             }
         }
+    }
+    // Trailing flag byte: delta window present or not.
+    match delta {
+        Some(d) => {
+            out.push(1);
+            for j in wj0..=wj1 {
+                for i in wi0..=wi1 {
+                    out.extend_from_slice(&gat(i, j, d).to_le_bytes());
+                }
+            }
+        }
+        None => out.push(0),
     }
     out
 }
@@ -270,5 +286,13 @@ pub fn decode_region_slice(b: &[u8]) -> RegionSlice {
         heights: take(&mut o),
         coast: take(&mut o),
         mountain: take(&mut o),
+        delta: {
+            if b[o] == 1 {
+                o += 1;
+                take(&mut o)
+            } else {
+                Vec::new()
+            }
+        },
     }
 }

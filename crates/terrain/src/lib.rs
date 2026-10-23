@@ -9,6 +9,7 @@
 
 pub mod build;
 pub mod glb;
+pub mod hydrology;
 pub mod mesh;
 pub mod outputs;
 pub mod region;

@@ -12,7 +12,7 @@ use std::str::FromStr;
 /// a generation golden is re-blessed. Pre-release, everything is v1.
 /// Lives in mb-seed because the golden-changelog helper needs it and
 /// mb-seed is the root of the dependency tree; mb-schema re-exports it.
-pub const CURRENT_GENERATOR_VERSION: u32 = 2;
+pub const CURRENT_GENERATOR_VERSION: u32 = 3;
 /// Oldest generator version this build can still run.
 pub const MIN_SUPPORTED_GENERATOR_VERSION: u32 = 1;
 

@@ -48,3 +48,11 @@ that never reached a commit.
 | 2026-10-23 | 2 | terrain/gen2_chunk_glb | (new) | 74f3b533ae95045d35b0bfd408a9be58064fceb4f70169f57f61a3eb3a6eea0f | generator 2: texturing weights, splat maps, TEXCOORD_1 |
 | 2026-10-23 | 2 | terrain/gen2_splat_png | (new) | be9baf40aebbbfd27b518644959cdb651029c6abbf919741eb6ba2c3645e254f | generator 2: texturing weights, splat maps, TEXCOORD_1 |
 | 2026-10-23 | 2 | terrain/gen2_manifest | (new) | b66bfe1570fd0d5399c6eeab661e2f3c58f69f9862e68db7021f7f5a979bc0e0 | generator 2: texturing weights, splat maps, TEXCOORD_1 |
+| 2026-10-23 | 3 | terrain/gen3_height_r16 | (new) | cd2e6ca8857669920f52fe304ba3770075e2e1d51d7105ed843d0108517b0bf4 | generator 3: hydrology (priority-flood, D8, rivers, lakes, carving) |
+| 2026-10-23 | 3 | terrain/gen3_river_mask | (new) | 991cb98d04d7ffe38beea13722aaaca01b213daa0d8f15c1082e984a22201048 | generator 3: hydrology (priority-flood, D8, rivers, lakes, carving) |
+| 2026-10-23 | 3 | terrain/gen3_chunk_glb | (new) | 74f3b533ae95045d35b0bfd408a9be58064fceb4f70169f57f61a3eb3a6eea0f | generator 3: hydrology (priority-flood, D8, rivers, lakes, carving) |
+| 2026-10-23 | 3 | terrain/gen3_manifest | (new) | 99ea7e42bbf41847c9eba0b147bc7db4f718dad8b21f693a0c9f17946183e0ad | generator 3: hydrology (priority-flood, D8, rivers, lakes, carving) |
+| 2026-10-23 | 3 | terrain/gen3_height_r16 | cd2e6ca88576 | 9133a4e9467e3d2d9e1f51b357fb6003955116e9f82b50bde306e0a8f3ac3228 | generator 3: carve with exact Euclidean nearest-river distance (was L1 chamfer); fixture region moved over the river |
+| 2026-10-23 | 3 | terrain/gen3_manifest | 99ea7e42bbf4 | 7301d81c0596b689770ad2c246078497c5159bbbf2ff015394abc905bde7bbbf | generator 3: carve with exact Euclidean nearest-river distance (was L1 chamfer); fixture region moved over the river |
+| 2026-10-23 | 3 | schema/canonical_project | 85e4426bfa80 | 5593599747a9354a9e1efec86407f35bdf40d3e9dbaa47bb853b677ff9924b17 | generator_version 3 becomes the default for new projects |
+| 2026-10-23 | 3 | schema/canonical_world | 37bf2c41f19b | 5e3e505d17fc34cd16387fe4649bb7b425b302fb220d2faf5332d3aa61ae6955 | generator_version 3 becomes the default for new projects |

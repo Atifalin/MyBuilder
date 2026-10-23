@@ -147,6 +147,8 @@ pub struct WorldRecipe {
     #[serde(default)]
     pub texturing: TexturingSection,
     #[serde(default)]
+    pub hydrology: HydrologySection,
+    #[serde(default)]
     pub export: ExportSettings,
     /// Higher-detail regions (S4): chunks of the coarse grid resampled
     /// at a finer cell size with extra noise octaves.
@@ -417,6 +419,81 @@ fn validate_texturing(t: &TexturingSection, out: &mut Vec<Diagnostic>) {
     }
 }
 
+/// Hydrology parameters (generator v3; ignored by v1/v2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HydrologySection {
+    #[serde(default = "h_catch")]
+    pub river_min_catchment_m2: f64,
+    #[serde(default = "h_ldep")]
+    pub lake_min_depth_m: f64,
+    #[serde(default = "h_larea")]
+    pub lake_min_area_m2: f64,
+    #[serde(default = "h_cdep")]
+    pub carve_depth_m: f64,
+    #[serde(default = "h_cwid")]
+    pub carve_width_m: f64,
+    #[serde(default = "h_maxw")]
+    pub max_half_width_m: f64,
+    #[serde(default = "h_mslope")]
+    pub min_bed_slope: f64,
+}
+fn h_catch() -> f64 {
+    150000.0
+}
+fn h_ldep() -> f64 {
+    0.5
+}
+fn h_larea() -> f64 {
+    2000.0
+}
+fn h_cdep() -> f64 {
+    2.0
+}
+fn h_cwid() -> f64 {
+    6.0
+}
+fn h_maxw() -> f64 {
+    30.0
+}
+fn h_mslope() -> f64 {
+    0.0005
+}
+impl Default for HydrologySection {
+    fn default() -> Self {
+        Self {
+            river_min_catchment_m2: 150000.0,
+            lake_min_depth_m: 0.5,
+            lake_min_area_m2: 2000.0,
+            carve_depth_m: 2.0,
+            carve_width_m: 6.0,
+            max_half_width_m: 30.0,
+            min_bed_slope: 0.0005,
+        }
+    }
+}
+fn validate_hydrology(t: &HydrologySection, out: &mut Vec<Diagnostic>) {
+    for (path, v) in [
+        (
+            "/hydrology/river_min_catchment_m2",
+            t.river_min_catchment_m2,
+        ),
+        ("/hydrology/lake_min_depth_m", t.lake_min_depth_m),
+        ("/hydrology/lake_min_area_m2", t.lake_min_area_m2),
+        ("/hydrology/carve_depth_m", t.carve_depth_m),
+        ("/hydrology/carve_width_m", t.carve_width_m),
+        ("/hydrology/max_half_width_m", t.max_half_width_m),
+        ("/hydrology/min_bed_slope", t.min_bed_slope),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            out.push(Diagnostic::error(
+                "world.hydrology.invalid",
+                path.to_string(),
+                "hydrology parameters must be finite and > 0".to_string(),
+            ));
+        }
+    }
+}
+
 /// A 2D map shape (coast, lake, mountain range, forest zone).
 /// `points` are `[x, z]` pairs in world meters, origin at world center.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -442,6 +519,7 @@ impl Default for WorldRecipe {
             chunk_size_m: 256.0,
             sea_level_m: 0.0,
             texturing: TexturingSection::default(),
+            hydrology: HydrologySection::default(),
             mode: WorldMode::LandFirst,
             terrain: TerrainSection {
                 feel: TerrainFeel::Hilly,
@@ -1056,6 +1134,7 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
         }
     }
     validate_texturing(&world.texturing, out);
+    validate_hydrology(&world.hydrology, out);
 }
 
 /// Validation for S4 detail regions.

@@ -509,6 +509,14 @@ pub fn build_project_observed(
         world.clone(),
         1,
     )));
+    if project.generator_version >= 3 {
+        pipe.add(Box::new(crate::stages::HydrologyStage::new(
+            1,
+            grid,
+            project.clone(),
+            world.clone(),
+        )));
+    }
     pipe.add(Box::new(LayersStage::new(
         grid,
         project.clone(),

@@ -135,6 +135,16 @@ fn params<T: Serialize>(v: &T) -> Vec<u8> {
     serde_json::to_vec(v).expect("stage params serialize")
 }
 
+/// Height input for gen >= 3 is the hydrology artifact (same layout,
+/// final_h in place of h); earlier gens use world.height.
+pub fn height_dep(generator_version: u32) -> String {
+    if generator_version >= 3 {
+        HydrologyStage::ID.to_string()
+    } else {
+        HeightStage::ID.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------
 
 pub struct MasksStage {
@@ -341,6 +351,7 @@ impl RegionStage {
         region: mb_schema::DetailRegion,
         code_version: u32,
     ) -> Self {
+        let height_dep_h = height_dep(project.generator_version);
         let stage_id = region_stage_id(&region.id);
         RegionStage {
             code_version,
@@ -350,7 +361,7 @@ impl RegionStage {
             region,
             stage_id,
             deps: vec![
-                HeightStage::ID.to_string(),
+                height_dep_h,
                 DistanceStage::ID.to_string(),
                 MasksStage::ID.to_string(),
             ],
@@ -546,8 +557,155 @@ impl Stage for ExportStage {
 
 pub const CHUNK_HEADER: usize = 8;
 
-/// world.layers: the raster layer bundle (r16 x2, masks, layers.json,
-/// hillshade preview). Normal stage, deps height + masks.
+// world.layers: the raster layer bundle (r16 x2, masks, layers.json,
+// hillshade preview). Normal stage, deps height + masks.
+
+// ---------------------------------------------------------------------
+/// world.hydrology (gen >= 3): priority-flood + D8 + lakes + rivers +
+/// carving on the coarse node grid.
+///
+/// Artifact layout (all LE, f64 unless noted):
+///   nx u64, nz u64, cell f64,
+///   final_h, delta, water (f64::NEG_INFINITY = no water), acc, each [nx*nz] f64;
+///   river[nx*nz] u8, lake[nx*nz] u8,
+///   lakes: u64 count, then (id u32, level f64, area f64) each.
+pub struct HydrologyStage {
+    pub code_version: u32,
+    pub grid: Grid,
+    pub project: ProjectFile,
+    pub world: WorldRecipe,
+    deps: Vec<String>,
+}
+impl HydrologyStage {
+    pub const ID: &'static str = "world.hydrology";
+    pub fn new(code_version: u32, grid: Grid, project: ProjectFile, world: WorldRecipe) -> Self {
+        Self {
+            code_version,
+            grid,
+            project,
+            world,
+            deps: vec![HeightStage::ID.to_string(), MasksStage::ID.to_string()],
+        }
+    }
+}
+
+/// Decode the hydrology artifact; see HydrologyStage for the layout.
+pub struct HydroPlanes {
+    pub final_h: Vec<f64>,
+    pub delta: Vec<f64>,
+    pub water: Vec<f64>,
+    pub river: Vec<u8>,
+    pub lake: Vec<u8>,
+    pub acc: Vec<f64>,
+    pub lakes: Vec<(u32, f64, f64)>,
+}
+pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
+    let mut o = 0;
+    let nx = get_u64(b, &mut o) as usize;
+    let nz = get_u64(b, &mut o) as usize;
+    let h_min = f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    o += 8;
+    let h_max = f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    o += 8;
+    let cell = (h_min, h_max); // packed min/max, decoded by caller
+    let n = nx * nz;
+    let final_h = get_f64s(b, &mut o, n);
+    let _coast = get_f64s(b, &mut o, n);
+    let delta = get_f64s(b, &mut o, n);
+    let water = get_f64s(b, &mut o, n);
+    let acc = get_f64s(b, &mut o, n);
+    let river = b[o..o + n].to_vec();
+    o += n;
+    let lake = b[o..o + n].to_vec();
+    o += n;
+    let nl = get_u64(b, &mut o) as usize;
+    let mut lakes = Vec::with_capacity(nl);
+    for _ in 0..nl {
+        let id = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        o += 4;
+        let level = f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        o += 8;
+        let area = f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        o += 8;
+        lakes.push((id, level, area));
+    }
+    (
+        nx,
+        nz,
+        cell.0,
+        HydroPlanes {
+            final_h,
+            delta,
+            water,
+            river,
+            lake,
+            acc,
+            lakes,
+        },
+    )
+}
+
+impl Stage for HydrologyStage {
+    fn id(&self) -> &str {
+        Self::ID
+    }
+    fn code_version(&self) -> u32 {
+        self.code_version
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn params(&self) -> Vec<u8> {
+        params(&(
+            self.project.generator_version,
+            &self.world.hydrology,
+            self.world.sea_level_m,
+        ))
+    }
+    fn run(&self, inputs: &[&Artifact], _seed: u64, ctx: &RunCtx) -> Result<Artifact, Cancelled> {
+        let (nx, nz, _hmin, _hmax, h, _coast) = decode_height(&inputs[0].bytes);
+        let (_g, masks) = decode_masks(&inputs[1].bytes);
+        let hydro = crate::hydrology::run(
+            &self.grid,
+            &h,
+            &masks.land,
+            self.world.sea_level_m,
+            &self.world.hydrology,
+            &|| ctx.tick(),
+        );
+        let n = nx * nz;
+        // Prefix is the height-artifact layout with final_h in place of
+        // h, so every downstream decode_height consumer just takes
+        // world.hydrology instead of world.height on gen >= 3.
+        let h_min = hydro.final_h.iter().fold(f64::INFINITY, |a, &x| a.min(x));
+        let h_max = hydro
+            .final_h
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &x| a.max(x));
+        let mut b = Vec::with_capacity(24 + n * 8 * 4 + n * 2 + n * 8);
+        b.extend_from_slice(&(nx as u64).to_le_bytes());
+        b.extend_from_slice(&(nz as u64).to_le_bytes());
+        b.extend_from_slice(&h_min.to_le_bytes());
+        b.extend_from_slice(&h_max.to_le_bytes());
+        for v in hydro.final_h.iter().chain(&_coast) {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in hydro.delta.iter().chain(&hydro.water).chain(&hydro.acc) {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&hydro.river);
+        b.extend_from_slice(&hydro.lake);
+        // order changed: acc now comes after masks; see layout doc below.
+        b.extend_from_slice(&(hydro.lakes.len() as u64).to_le_bytes());
+        for &(id, lv, area) in &hydro.lakes {
+            b.extend_from_slice(&id.to_le_bytes());
+            b.extend_from_slice(&lv.to_le_bytes());
+            b.extend_from_slice(&area.to_le_bytes());
+        }
+        Ok(Artifact::new(b))
+    }
+}
+
 pub struct LayersStage {
     pub code_version: u32,
     pub grid: Grid,
@@ -559,12 +717,13 @@ pub struct LayersStage {
 impl LayersStage {
     pub const ID: &'static str = "world.layers";
     pub fn new(grid: Grid, project: ProjectFile, world: WorldRecipe, code_version: u32) -> Self {
+        let hd = height_dep(project.generator_version);
         LayersStage {
             code_version,
             grid,
             project,
             world,
-            deps: vec![HeightStage::ID.to_string(), MasksStage::ID.to_string()],
+            deps: vec![hd, MasksStage::ID.to_string()],
         }
     }
 }
@@ -627,6 +786,35 @@ impl Stage for LayersStage {
                     outputs::rgba_png(&rgba, self.grid.nx as u32, self.grid.nz as u32),
                 ));
             }
+            if self.project.generator_version >= 3 {
+                let (_hx, _hz, _c, hp) = decode_hydro(&inputs[0].bytes);
+                bundle
+                    .files
+                    .push(("layers/river.u8".to_string(), hp.river.clone()));
+                bundle
+                    .files
+                    .push(("layers/lake.u8".to_string(), hp.lake.clone()));
+                let mut f32s = Vec::with_capacity(hp.acc.len() * 4);
+                for a in &hp.acc {
+                    f32s.extend_from_slice(&(*a as f32).to_le_bytes());
+                }
+                bundle.files.push(("layers/flow_acc.f32".to_string(), f32s));
+                // lakes list in layers.json
+                for (p, bytes) in bundle.files.iter_mut() {
+                    if p == "layers/layers.json" {
+                        let mut j: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                        j["lakes"] = serde_json::json!(
+                            hp.lakes
+                                .iter()
+                                .map(|&(id, lv, area)| {
+                                    serde_json::json!({"id": id, "level": lv, "area_m2": area})
+                                })
+                                .collect::<Vec<_>>()
+                        );
+                        *bytes = serde_json::to_vec(&j).unwrap();
+                    }
+                }
+            }
             bundle.encode()
         })
     }
@@ -660,6 +848,7 @@ impl ChunkStage {
         cz: usize,
         code_version: u32,
     ) -> Self {
+        let hd = height_dep(project.generator_version);
         ChunkStage {
             code_version,
             grid,
@@ -668,7 +857,7 @@ impl ChunkStage {
             cx,
             cz,
             stage_id: chunk_stage_id(cx, cz),
-            deps: vec![HeightStage::ID.to_string()],
+            deps: vec![hd],
         }
     }
 }
@@ -822,6 +1011,7 @@ impl RegionChunkStage {
         code_version: u32,
     ) -> Self {
         let stage_id = region_chunk_stage_id(&region.id, cx, cz);
+        let hd = height_dep(project.generator_version);
         RegionChunkStage {
             code_version,
             grid,
@@ -831,7 +1021,7 @@ impl RegionChunkStage {
             cx,
             cz,
             stage_id,
-            deps: vec![HeightStage::ID.to_string(), DistanceStage::ID.to_string()],
+            deps: vec![hd, DistanceStage::ID.to_string()],
         }
     }
 }
@@ -872,6 +1062,11 @@ impl mb_pipeline::SlicedStage for RegionChunkStage {
         };
         let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
         let step = self.world.export.mesh_step_cells as usize;
+        let delta: Option<Vec<f64>> = if self.project.generator_version >= 3 {
+            Some(decode_hydro(&inputs[0].bytes).3.delta)
+        } else {
+            None
+        };
         crate::slice::encode_region_slice(
             &self.grid,
             &hf,
@@ -881,6 +1076,7 @@ impl mb_pipeline::SlicedStage for RegionChunkStage {
             step,
             self.cx,
             self.cz,
+            delta.as_deref(),
         )
     }
     fn run(&self, slice: &[u8], _seed: u64, ctx: &RunCtx) -> Result<Artifact, Cancelled> {

@@ -68,6 +68,13 @@ pub struct Cache {
     map: BTreeMap<String, ([u8; 32], Artifact)>,
 }
 
+impl Cache {
+    /// The cached artifact for a stage, if present.
+    pub fn get(&self, id: &str) -> Option<&Artifact> {
+        self.map.get(id).map(|(_, a)| a)
+    }
+}
+
 #[derive(Debug)]
 pub struct RunReport {
     /// Stages executed this run, in execution order.
@@ -76,6 +83,9 @@ pub struct RunReport {
     pub reused: Vec<String>,
     /// Final output hash per stage.
     pub outputs: BTreeMap<String, [u8; 32]>,
+    /// Wall time of each executed `run()` call, microseconds. Reused
+    /// stages have no entry.
+    pub durations_us: BTreeMap<String, u64>,
 }
 
 pub struct Pipeline {
@@ -177,6 +187,7 @@ impl Pipeline {
             executed: Vec::new(),
             reused: Vec::new(),
             outputs: BTreeMap::new(),
+            durations_us: BTreeMap::new(),
         };
         for &i in &order {
             let stage = &*self.stages[i];
@@ -195,7 +206,11 @@ impl Pipeline {
                     cached.clone()
                 }
                 _ => {
+                    let t0 = std::time::Instant::now();
                     let a = stage.run(&inputs, stage_seed);
+                    report
+                        .durations_us
+                        .insert(id.clone(), t0.elapsed().as_micros() as u64);
                     cache.map.insert(id.clone(), (ih, a.clone()));
                     report.executed.push(id.clone());
                     a

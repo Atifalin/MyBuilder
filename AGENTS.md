@@ -28,9 +28,12 @@ golden means a changed output.
 
 - No `HashMap` iteration anywhere that affects output; use `BTreeMap` or
   `Vec`.
-- No libm transcendental functions (`sin`, `cos`, `exp`, `powf`, `sqrt`,
+- No libm transcendental functions (`sin`, `cos`, `exp`, `powf`,
   `atan`, ...) in generation paths — they differ across OSes. Write needed
   constants as literals. No `mul_add` / fused multiply-add.
+  `sqrt` IS allowed: IEEE 754 requires it to be correctly rounded, so it
+  is bit-identical on every platform (used by the EDT and normal
+  normalization).
 - All randomness comes from `mb_seed::Rng` (counter-based); derive child
   seeds with `mb_seed::derive` / `derive_path`, never from iteration order.
 - Seeds serialize as 16-char lowercase hex strings in JSON.
@@ -71,3 +74,29 @@ must never depend on the other core crates directly.
 - One-shot verification: `bash scripts/s2-bindings-gate.sh` builds release,
   runs all three probes and exits 0 only if the `version` and `probe`
   lines match. Override binaries via `GODOT_BIN` / `BLENDER_BIN`.
+
+## Terrain pipeline (S3)
+
+- `mybuilder build <dir>` runs masks -> distance -> height -> export via
+  mb-pipeline and writes layers/, previews/hillshade.png,
+  exports/terrain/chunk_*.glb and manifest.json. Files are only written
+  when their bytes change (blake3 compare); the manifest is written last,
+  atomically.
+- Gotchas hit during S3: glTF extras DO survive Godot's runtime
+  `GLTFDocument.append_from_file`/`generate_scene` (node meta "extras").
+  GDScript `:=` type inference fails on `max()`/transform products —
+  annotate `var x: float`/`var aabb: AABB`. `Camera3D.look_at` requires
+  the node to be inside the tree; use `look_at_from_position` instead.
+  Godot AABB checks: apply each node's transform exactly once (the scene
+  root's own transform is not included in `Node3D.transform` of children,
+  apply it at the top level).
+- `scripts/s3-terrain-gate.sh` runs new+build+Godot+Blender checks and
+  exits 0 only if both print PASS.
+- Vertex colors: the glTF spec expects COLOR_0 to feed base color, but
+  neither importer does it automatically — `import_world.gd` sets
+  `vertex_color_use_as_albedo = true` per StandardMaterial3D, and
+  `import_world.py` wires a Color Attribute node into Base Color.
+- Noise lattice artifacts: axis-aligned gradients plus same-orientation
+  octave lattices draw visible grid lines. mb-geom uses 22.5-degree-rotated
+  gradients and a rational rotation R=[[0.6,-0.8],[0.8,0.6]] plus an
+  i*(37.719,-91.137) offset per octave — do not "simplify" these.

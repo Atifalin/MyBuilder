@@ -3,3 +3,4 @@ target/
 __pycache__/
 adapters/godot/demo/bin/
 adapters/godot/demo/.godot/
+.DS_Store

@@ -61,7 +61,7 @@ world   250c175afda026153f85ee35b32938e9eb8405a6d54a9d26bfe0a243c91afb3f
 
 $ cargo run -p mb-cli -- probe
 version 0.1.0
-probe 7b70ecba080328a6d00a0eef5449cf8ed77549bad953fc760f56b501d2ff5fe8
+probe 2ea5ca993b84f1be29e078663e8f2b0edff151170f71fdd346ade3ffce37f3b7
 ```
 
 `validate` prints one line per finding as `severity code path: message
@@ -109,6 +109,19 @@ my-world/
     "feel": "hilly",
     "overrides": {}
   },
+  "profile": {
+    "shelf_depth_m": 40.0,
+    "shelf_width_m": 300.0,
+    "coast_height_m": 2.0,
+    "inland_height_m": 30.0,
+    "inland_width_m": 400.0,
+    "mountain_height_m": 600.0,
+    "mountain_falloff_m": 250.0,
+    "feature_size_m": 512.0
+  },
+  "export": {
+    "mesh_step_cells": 4
+  },
   "shapes": [
     {
       "id": "coast-1",
@@ -122,6 +135,11 @@ my-world/
 - The default world carries one centered 12-point land blob (~700 m radius)
   so there is always land to build on. Shape `kind` is one of
   `land | water | mountain | forest`.
+- `profile` drives the coast-to-inland height curve (algorithms doc 3.4)
+  plus mountain weighting and the base noise wavelength
+  (`frequency = 1 / feature_size_m`).
+- `export.mesh_step_cells` is the vertex stride of exported chunk meshes
+  (data stays at 1 m cells).
 - `terrain.overrides` may set `octaves`, `gain`, `lacunarity`, `relief_m`,
   `ridged_mix`; each replaces the corresponding preset field.
 
@@ -136,6 +154,35 @@ Terrain feel presets:
 Conventions: meters, right-handed, Y-up, origin at the world centre, 2D
 plans in the XZ plane, seeds as 16-char lowercase hex strings.
 
+## Build a world
+
+```bash
+$ cargo run --release -p mb-cli -- build my-world
+stage world.masks: ran in 0.008 s
+stage world.distance: ran in 0.114 s
+stage world.height: ran in 0.301 s
+stage world.export: ran in 0.148 s
+files written: 72
+files unchanged: 0
+h_min -40.000 m, h_max 76.419 m
+64 chunks, 270400 vertices, 524288 triangles
+```
+
+It writes, into the project folder:
+
+```
+layers/height.r16            full-res u16 height (2049x2049 for 2048 m)
+layers/height_terrain3d.r16  cropped 2048x2048 variant for Terrain3D
+layers/land.u8  mountain.u8  forest.u8
+layers/layers.json           dims, origin, h_min/h_max, step, file list
+previews/hillshade.png       shaded-relief preview, 1 px per 2 m
+exports/terrain/chunk_*.glb  one glTF mesh per 256 m chunk (mesh_step 4)
+exports/terrain/manifest.json  chunk index + totals (written last, atomic)
+```
+
+Only changed files are rewritten (blake3 compare), so a rebuild with no
+edits reports `files written: 0`.
+
 ## Repository layout
 
 | path | crate | purpose |
@@ -145,10 +192,11 @@ plans in the XZ plane, seeds as 16-char lowercase hex strings.
 | `crates/geom` | mb-geom | integer grid snapping, deterministic Perlin/fBm/ridged noise |
 | `crates/pipeline` | mb-pipeline | stage DAG runner with memo cache and early cutoff |
 | `crates/bridge` | mb-bridge | engine-agnostic facade; the only crate adapters may call |
+| `crates/terrain` | mb-terrain | masks, signed distance (EDT), height, quantized layers, chunk meshes, GLB writer, output bundle |
 | `crates/cli` | mb-cli | the `mybuilder` binary |
 | `adapters/godot` | mb-godot | Godot GDExtension (`MyBuilderCore` class) + headless demo project |
 | `adapters/blender` | mb-blender | PyO3 module `mybuilder_core`, built as an abi3 wheel |
-| `scripts/` | — | `s2-bindings-gate.sh` (three-way determinism check) |
+| `scripts/` | — | `s2-bindings-gate.sh`, `s3-terrain-gate.sh` |
 
 ## Testing
 

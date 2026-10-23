@@ -43,6 +43,8 @@ enum Command {
     Info { dir: PathBuf },
     /// Print the version and determinism probe hash.
     Probe,
+    /// Validate, run the terrain pipeline and write outputs.
+    Build { dir: PathBuf },
 }
 
 fn gen_seed() -> u64 {
@@ -155,6 +157,77 @@ fn cmd_info(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_build(dir: &Path) -> Result<ExitCode, String> {
+    let (project, world, diags) = mb_schema::load_project(dir).map_err(|e| e.to_string())?;
+    print_diags(&diags);
+    if has_errors(&diags) {
+        return Ok(ExitCode::FAILURE);
+    }
+    let cell = project.world_scale.cell_size_m;
+    let grid = mb_terrain::Grid::new(world.extent.width_m, world.extent.depth_m, cell);
+    let mut pipe = mb_pipeline::Pipeline::new(project.seed);
+    pipe.add(Box::new(mb_terrain::stages::MasksStage {
+        code_version: 1,
+        grid,
+        mode: world.mode,
+        shapes: world.shapes.clone(),
+        cell_size_m: cell,
+        extent: world.extent,
+    }));
+    pipe.add(Box::new(mb_terrain::stages::DistanceStage::new(
+        grid, cell, 1,
+    )));
+    pipe.add(Box::new(mb_terrain::stages::HeightStage::new(
+        grid,
+        project.clone(),
+        world.clone(),
+        1,
+    )));
+    pipe.add(Box::new(mb_terrain::stages::ExportStage::new(
+        grid, project, world, 1,
+    )));
+    let mut cache = mb_pipeline::Cache::default();
+    let report = pipe.run(&mut cache).map_err(|e| e.to_string())?;
+    for id in &report.executed {
+        let us = report.durations_us.get(id).copied().unwrap_or(0);
+        println!("stage {id}: ran in {:.3} s", us as f64 / 1e6);
+    }
+    for id in &report.reused {
+        println!("stage {id}: reused");
+    }
+    // The export artifact is the whole output bundle.
+    let bundle_bytes = cache
+        .get(mb_terrain::stages::ExportStage::ID)
+        .ok_or("export artifact missing")?
+        .bytes
+        .clone();
+    let bundle = mb_terrain::outputs::FileBundle::decode(&bundle_bytes);
+    let mut h_min = f64::NAN;
+    let mut h_max = f64::NAN;
+    let mut totals = String::new();
+    for (rel, data) in &bundle.files {
+        if rel == mb_terrain::outputs::MANIFEST_PATH {
+            let m: serde_json::Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+            h_min = m["h_min"].as_f64().unwrap_or(f64::NAN);
+            h_max = m["h_max"].as_f64().unwrap_or(f64::NAN);
+            let t = &m["totals"];
+            totals = format!(
+                "{} chunks, {} vertices, {} triangles",
+                t["chunks"], t["vertices"], t["triangles"]
+            );
+        }
+    }
+    let wr = mb_terrain::outputs::write_outputs(dir, &bundle).map_err(|e| e.to_string())?;
+    println!("files written: {}", wr.written.len());
+    for f in &wr.written {
+        println!("  wrote {f}");
+    }
+    println!("files unchanged: {}", wr.unchanged.len());
+    println!("h_min {h_min:.3} m, h_max {h_max:.3} m");
+    println!("{totals}");
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_probe() -> ExitCode {
     println!("version {}", mb_bridge::version());
     println!("probe {}", mb_bridge::probe());
@@ -169,6 +242,7 @@ fn main() -> ExitCode {
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),
         Command::Probe => Ok(cmd_probe()),
+        Command::Build { dir } => cmd_build(&dir),
     };
     match result {
         Ok(code) => code,

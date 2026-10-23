@@ -29,19 +29,21 @@ pub fn to_meters(i: i64) -> f64 {
     i as f64 / UNITS_PER_METER as f64
 }
 
+// 8 unit directions rotated 22.5 degrees off the axes so no gradient
+// lies on a lattice axis (axis-aligned gradients produce visible square
+// artifacts). Constants are literals: no trig at runtime.
+const COS22_5: f64 = 0.9238795325112867;
+const SIN22_5: f64 = 0.3826834323650898;
 const GRAD: [(f64, f64); 8] = [
-    (1.0, 0.0),
-    (-1.0, 0.0),
-    (0.0, 1.0),
-    (0.0, -1.0),
-    (FRAC_1_SQRT_2, FRAC_1_SQRT_2),
-    (-FRAC_1_SQRT_2, FRAC_1_SQRT_2),
-    (FRAC_1_SQRT_2, -FRAC_1_SQRT_2),
-    (-FRAC_1_SQRT_2, -FRAC_1_SQRT_2),
+    (COS22_5, SIN22_5),
+    (-COS22_5, SIN22_5),
+    (COS22_5, -SIN22_5),
+    (-COS22_5, -SIN22_5),
+    (SIN22_5, COS22_5),
+    (-SIN22_5, COS22_5),
+    (SIN22_5, -COS22_5),
+    (-SIN22_5, -COS22_5),
 ];
-
-// 1/sqrt(2) as a compile-time constant so no runtime sqrt is needed.
-const FRAC_1_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// Deterministic 2D Perlin gradient noise.
 ///
@@ -118,15 +120,35 @@ pub struct FbmParams {
 /// Normalized fBm: `(Σ g^i · n(f^i · p)) / (Σ g^i)` over `octaves`.
 /// Output stays in approximately [-1, 1] regardless of octave count.
 pub fn fbm(p: &Perlin, x: f64, z: f64, params: &FbmParams) -> f64 {
+    sum_octaves(p, x, z, params, false)
+}
+
+/// fBm over the per-octave ridged transform, normalized by Σ g^i.
+/// Output in [0, 1] with sharp crests.
+pub fn ridged_fbm(p: &Perlin, x: f64, z: f64, params: &FbmParams) -> f64 {
+    sum_octaves(p, x, z, params, true)
+}
+
+/// Shared octave loop. To break up lattice alignment, each successive
+/// octave samples a point rotated once more by the rational rotation
+/// R = [[0.6, -0.8], [0.8, 0.6]] (a Pythagorean rotation, exact) and
+/// offset by `i * (37.719, -91.137)` lattice units after scaling. All
+/// constants are literals; no trig, so output stays deterministic.
+fn sum_octaves(p: &Perlin, x: f64, z: f64, params: &FbmParams, ridged_mode: bool) -> f64 {
     let mut amp = 1.0;
     let mut freq = params.frequency;
     let mut sum = 0.0;
     let mut norm = 0.0;
-    for _ in 0..params.octaves {
-        sum += amp * p.noise(x * freq, z * freq);
+    let (mut rx, mut rz) = (x, z);
+    for i in 0..params.octaves {
+        let n = p.noise(rx * freq + i as f64 * 37.719, rz * freq - i as f64 * 91.137);
+        sum += amp * if ridged_mode { ridged(n) } else { n };
         norm += amp;
         amp *= params.gain;
         freq *= params.lacunarity;
+        let next_rx = 0.6 * rx - 0.8 * rz;
+        rz = 0.8 * rx + 0.6 * rz;
+        rx = next_rx;
     }
     if norm == 0.0 { 0.0 } else { sum / norm }
 }
@@ -135,20 +157,4 @@ pub fn fbm(p: &Perlin, x: f64, z: f64, params: &FbmParams) -> f64 {
 pub fn ridged(n: f64) -> f64 {
     let r = 1.0 - n.abs();
     r * r
-}
-
-/// fBm over the per-octave ridged transform, normalized by Σ g^i.
-/// Output in [0, 1] with sharp crests.
-pub fn ridged_fbm(p: &Perlin, x: f64, z: f64, params: &FbmParams) -> f64 {
-    let mut amp = 1.0;
-    let mut freq = params.frequency;
-    let mut sum = 0.0;
-    let mut norm = 0.0;
-    for _ in 0..params.octaves {
-        sum += amp * ridged(p.noise(x * freq, z * freq));
-        norm += amp;
-        amp *= params.gain;
-        freq *= params.lacunarity;
-    }
-    if norm == 0.0 { 0.0 } else { sum / norm }
 }

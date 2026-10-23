@@ -128,6 +128,10 @@ pub struct WorldRecipe {
     pub sea_level_m: f64,
     pub mode: WorldMode,
     pub terrain: TerrainSection,
+    #[serde(default)]
+    pub profile: TerrainProfile,
+    #[serde(default)]
+    pub export: ExportSettings,
     pub shapes: Vec<Shape>,
 }
 
@@ -143,6 +147,59 @@ pub struct Extent {
 pub enum WorldMode {
     LandFirst,
     WaterFirst,
+}
+
+/// Coast-to-inland height profile parameters (all meters).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerrainProfile {
+    /// How deep the seabed gets.
+    pub shelf_depth_m: f64,
+    /// Horizontal distance over which the seabed reaches full depth.
+    pub shelf_width_m: f64,
+    /// Height right at the coastline.
+    pub coast_height_m: f64,
+    /// Height reached far inland before noise is added.
+    pub inland_height_m: f64,
+    /// Horizontal distance over which base height rises to inland_height.
+    pub inland_width_m: f64,
+    /// Extra height added inside mountain shapes at full weight.
+    pub mountain_height_m: f64,
+    /// Distance inside a mountain shape over which its weight ramps 0 -> 1.
+    pub mountain_falloff_m: f64,
+    /// Base noise wavelength in meters; noise frequency = 1 / feature_size.
+    pub feature_size_m: f64,
+}
+
+impl Default for TerrainProfile {
+    fn default() -> Self {
+        TerrainProfile {
+            shelf_depth_m: 40.0,
+            shelf_width_m: 300.0,
+            coast_height_m: 2.0,
+            inland_height_m: 30.0,
+            inland_width_m: 400.0,
+            mountain_height_m: 600.0,
+            mountain_falloff_m: 250.0,
+            feature_size_m: 512.0,
+        }
+    }
+}
+
+/// Export-time settings (affect mesh files, not layer data).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportSettings {
+    /// Vertex stride of exported chunk meshes, in grid cells. Data stays
+    /// at 1 m cells; meshes are lighter. Must be a power of two that
+    /// divides chunk_size_m / cell_size_m.
+    pub mesh_step_cells: u32,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        ExportSettings { mesh_step_cells: 4 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,6 +325,8 @@ impl Default for WorldRecipe {
                 feel: TerrainFeel::Hilly,
                 overrides: TerrainOverrides::default(),
             },
+            profile: TerrainProfile::default(),
+            export: ExportSettings::default(),
             shapes: vec![Shape {
                 id: "coast-1".to_string(),
                 kind: ShapeKind::Land,
@@ -628,6 +687,57 @@ pub fn validate_world(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagn
     }
 
     terrain_override_diags(&world.terrain.overrides, out);
+
+    let prof = &world.profile;
+    for (field, v) in [
+        ("shelf_width_m", prof.shelf_width_m),
+        ("inland_width_m", prof.inland_width_m),
+        ("mountain_falloff_m", prof.mountain_falloff_m),
+        ("feature_size_m", prof.feature_size_m),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            out.push(Diagnostic::error(
+                "world.profile.non_positive",
+                format!("/profile/{field}"),
+                format!("profile {field} = {v} must be finite and positive"),
+            ));
+        }
+    }
+    for (field, v) in [
+        ("shelf_depth_m", prof.shelf_depth_m),
+        ("coast_height_m", prof.coast_height_m),
+        ("inland_height_m", prof.inland_height_m),
+        ("mountain_height_m", prof.mountain_height_m),
+    ] {
+        if !v.is_finite() {
+            out.push(Diagnostic::error(
+                "world.profile.non_finite",
+                format!("/profile/{field}"),
+                format!("profile {field} = {v} must be finite"),
+            ));
+        }
+    }
+
+    let step = world.export.mesh_step_cells;
+    if !step.is_power_of_two() {
+        out.push(Diagnostic::error(
+            "world.export.mesh_step.invalid",
+            "/export/mesh_step_cells".to_string(),
+            format!("mesh_step_cells {step} must be a power of two"),
+        ));
+    } else if cell_size_m > 0.0 && chunk.is_finite() && chunk > 0.0 {
+        let cells_per_chunk = chunk / cell_size_m;
+        if cells_per_chunk.fract() == 0.0 && cells_per_chunk % step as f64 != 0.0 {
+            out.push(
+                Diagnostic::error(
+                    "world.export.mesh_step.invalid",
+                    "/export/mesh_step_cells".to_string(),
+                    format!("mesh_step_cells {step} does not divide chunk cells {cells_per_chunk}"),
+                )
+                .with_suggestion("use a power of two dividing chunk_size_m / cell_size_m"),
+            );
+        }
+    }
 
     let mut seen_ids = BTreeSet::new();
     for (i, shape) in world.shapes.iter().enumerate() {

@@ -11,6 +11,70 @@ import bpy
 from mathutils import Vector
 
 
+PALETTE = {
+    'grass': (0.35, 0.55, 0.28, 1.0),
+    'sand': (0.87, 0.79, 0.56, 1.0),
+    'rock': (0.45, 0.43, 0.40, 1.0),
+    'snow': (0.92, 0.93, 0.95, 1.0),
+}
+
+
+def wire_splat_material(obj, splat_path):
+    """Gen 2: build a material that samples the splat PNG on UV layer 2
+    and blends the 4 palette colors by RGBA weights."""
+    if obj.type != 'MESH' or not obj.material_slots:
+        return
+    img = bpy.data.images.load(splat_path)
+    img.colorspace_settings.name = 'Non-Color'
+    img.alpha_mode = 'CHANNEL_PACKED'
+    for slot in obj.material_slots:
+        mat = slot.material
+        if not mat:
+            continue
+        mat.use_nodes = True
+        nt = mat.node_tree
+        bsdf = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if bsdf is None:
+            continue
+        for n in list(nt.nodes):
+            if n.type == 'BSDF_PRINCIPLED' or n.type == 'OUTPUT_MATERIAL':
+                continue
+            nt.nodes.remove(n)
+        tex = nt.nodes.new('ShaderNodeTexImage')
+        tex.image = img
+        uvmap = nt.nodes.new('ShaderNodeUVMap')
+        # Second UV layer = TEXCOORD_1 (splat).
+        uvmap.uv_map = obj.data.uv_layers[1].name if len(obj.data.uv_layers) > 1 else obj.data.uv_layers[0].name
+        nt.links.new(uvmap.outputs['UV'], tex.inputs['Vector'])
+        sep = nt.nodes.new('ShaderNodeSeparateColor')
+        nt.links.new(tex.outputs['Color'], sep.inputs['Color'])
+        # weighted palette blend: col = grass*R + sand*G + rock*B + snow*A
+        mix = nt.nodes.new('ShaderNodeMix')
+        mix.data_type = 'RGBA'
+        mix.blend_type = 'MULTIPLY'
+        mix.inputs['Factor'].default_value = 1.0
+        # Build col = grass*R+sand*G+rock*B+snow*A via MixRGB adds.
+        add1 = nt.nodes.new('ShaderNodeMixRGB'); add1.blend_type='MULTIPLY'; add1.inputs[0].default_value=1.0
+        add1.inputs[1].default_value = PALETTE['grass']
+        add2 = nt.nodes.new('ShaderNodeMixRGB'); add2.blend_type='MULTIPLY'; add2.inputs[0].default_value=1.0
+        add2.inputs[1].default_value = PALETTE['sand']
+        add3 = nt.nodes.new('ShaderNodeMixRGB'); add3.blend_type='MULTIPLY'; add3.inputs[0].default_value=1.0
+        add3.inputs[1].default_value = PALETTE['rock']
+        add4 = nt.nodes.new('ShaderNodeMixRGB'); add4.blend_type='MULTIPLY'; add4.inputs[0].default_value=1.0
+        add4.inputs[1].default_value = PALETTE['snow']
+        nt.links.new(sep.outputs['Red'], add1.inputs[0])
+        nt.links.new(sep.outputs['Green'], add2.inputs[0])
+        nt.links.new(sep.outputs['Blue'], add3.inputs[0])
+        nt.links.new(tex.outputs['Alpha'], add4.inputs[0])
+        s1 = nt.nodes.new('ShaderNodeMixRGB'); s1.blend_type='ADD'; s1.inputs[0].default_value=1.0
+        s2 = nt.nodes.new('ShaderNodeMixRGB'); s2.blend_type='ADD'; s2.inputs[0].default_value=1.0
+        s3 = nt.nodes.new('ShaderNodeMixRGB'); s3.blend_type='ADD'; s3.inputs[0].default_value=1.0
+        nt.links.new(add1.outputs[0], s1.inputs[1]); nt.links.new(add2.outputs[0], s1.inputs[2])
+        nt.links.new(add3.outputs[0], s2.inputs[1]); nt.links.new(add4.outputs[0], s2.inputs[2])
+        nt.links.new(s1.outputs[0], s3.inputs[1]); nt.links.new(s2.outputs[0], s3.inputs[2])
+        nt.links.new(s3.outputs[0], bsdf.inputs['Base Color'])
+
+
 def wire_color_attribute(obj):
     """glTF COLOR_0 should feed base color; wire a Color Attribute node
     if the importer left it unconnected."""
@@ -60,8 +124,22 @@ def main() -> int:
             continue
         new_objs = [o for o in bpy.data.objects if o not in before]
         for obj in new_objs:
-            wire_color_attribute(obj)
+            if "splat_channels" in manifest and "splat" in c:
+                wire_splat_material(obj, os.path.join(base, c["splat"]["file"]))
+            else:
+                wire_color_attribute(obj)
         imported.extend(new_objs)
+        if "splat_channels" in manifest and "splat" in c:
+            for obj in new_objs:
+                if obj.type == 'MESH' and obj.material_slots:
+                    m = obj.material_slots[0].material
+                    if m is None or not any(
+                        n.type == 'TEX_IMAGE' for n in m.node_tree.nodes
+                    ):
+                        failures.append(f"{c['file']}: splat material missing")
+                    img = bpy.data.images.get(os.path.basename(c["splat"]["file"]))
+                    if img is None or img.size[0] == 0:
+                        failures.append(f"{c['file']}: splat image not loaded")
 
     if len(imported) != len(work):
         failures.append(f"imported {len(imported)} objects, manifest lists {len(work)}")

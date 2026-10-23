@@ -36,6 +36,14 @@ required components.
 - Bumping `mb_seed::CURRENT_GENERATOR_VERSION` rekeys every stage.
 - Editing helpers that write the recipe don't bump generator_version;
   generation algorithms do.
+- Gen 2 (texturing): chunk artifacts carry a `u32 len + RGBA8 PNG`
+  splat tail after the GLB; the GLB's own length header gives the
+  boundary. Godot: `import_world.gd` switches to `terrain_splat.gdshader`
+  when the manifest has `splat_channels` (UV2 + `splat` uniform; PNGs
+  load via `Image.load_from_file`). Blender: `import_world.py` wires an
+  Image Texture on UV layer 2 (`ShaderNodeUVMap`, Non-Color) through
+  Separate Color into weighted palette MixRGBs — its SeparateColor node
+  has no Alpha output; use the texture's Alpha output directly.
 - Control app: `cd apps/desktop/src-tauri && cargo run` (run from that dir so its
   `.cargo/config.toml` puts output in the root `target/app`; `--manifest-path` from the
   repo root ignores it and creates a duplicate multi-GB target dir)

@@ -30,6 +30,9 @@ func _initialize() -> void:
 		return
 
 	var base_dir := manifest_path.get_base_dir()
+	var gen2: bool = manifest.has("splat_channels")
+	var shader_path := "res://terrain_splat.gdshader"
+	var want_tex := int(manifest["chunk_size_m"] / manifest["cell_size_m"]) + 1
 	var chunks: Array = manifest["chunks"]
 	var h_min: float = manifest["h_min"]
 	var h_max: float = manifest["h_max"]
@@ -61,7 +64,10 @@ func _initialize() -> void:
 			failures.append("append_from_file failed for %s: %s" % [c["file"], error_string(err)])
 			continue
 		var scene := doc.generate_scene(state)
-		enable_vertex_colors(scene)
+		if gen2 and c.has("splat"):
+			apply_splat(scene, base_dir.path_join(c["splat"]["file"]), shader_path, c["file"], want_tex if not c.has("region") else 0)
+		else:
+			enable_vertex_colors(scene)
 		world_root.add_child(scene)
 		loaded += 1
 		var aabb: AABB = scene.transform * subtree_aabb(scene)
@@ -91,6 +97,10 @@ func _initialize() -> void:
 	else:
 		failures.append("no chunks loaded")
 	print("S3: extras present on %d/%d chunks" % [extras_seen, loaded])
+	for f in splat_failures:
+		failures.append(f)
+	if gen2:
+		print("S3: splat materials checked")
 	finish(png_path, {"w": w, "d": d, "h_max": h_max, "sea": manifest["sea_level_m"]})
 
 func enable_vertex_colors(node: Node) -> void:
@@ -104,6 +114,36 @@ func enable_vertex_colors(node: Node) -> void:
 				mat.vertex_color_use_as_albedo = true
 	for child in node.get_children():
 		enable_vertex_colors(child)
+
+var splat_failures: Array = []
+
+func apply_splat(node: Node, png_path: String, shader_path: String, file: String, want: int) -> void:
+	# Gen 2: replace the material with a splat shader that reads the
+	# chunk's RGBA weight map on UV2.
+	var img := Image.new()
+	if img.load(png_path) != OK:
+		splat_failures.append("splat png failed: " + png_path)
+		return
+	var tex := ImageTexture.create_from_image(img)
+	var mat := ShaderMaterial.new()
+	mat.shader = load(shader_path)
+	mat.set_shader_parameter("splat", tex)
+	if node is MeshInstance3D:
+		node.material_override = mat
+		# Headless check: ShaderMaterial + texture of expected size.
+		var sm := node.get_active_material(0) as ShaderMaterial
+		if sm == null:
+			splat_failures.append("%s: active material is not ShaderMaterial" % file)
+		else:
+			var t = sm.get_shader_parameter("splat")
+			# Region chunks are finer; check square + at least the coarse size.
+			if t == null or t.get_width() != t.get_height() 				or (want > 0 and t.get_width() < want):
+				splat_failures.append(
+					"%s: splat %sx%s want >=%s" % [file,
+					0 if t == null else t.get_width(),
+					0 if t == null else t.get_height(), want])
+	for ch in node.get_children():
+		apply_splat(ch, png_path, shader_path, file, want)
 
 func subtree_aabb(node: Node) -> AABB:
 	# Returns the AABB in `node`'s local space. Each child's own transform

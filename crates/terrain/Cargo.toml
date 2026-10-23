@@ -15,3 +15,5 @@ png.workspace = true
 
 [dev-dependencies]
 mb-seed = { workspace = true, features = ["golden"] }
+mb-pipeline = { workspace = true, features = ["testing"] }
+

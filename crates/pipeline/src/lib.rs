@@ -16,6 +16,69 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// Cooperative cancellation token shared by pipeline and builds.
+#[derive(Clone, Default)]
+pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Stage run failed because the token was cancelled mid-work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+/// Context handed to every stage run. Long loops should call
+/// [`RunCtx::tick`] per row and bail out when it returns true.
+pub struct RunCtx<'a> {
+    cancel: &'a CancelToken,
+    #[cfg(feature = "testing")]
+    budget: Option<&'a std::cell::Cell<u64>>,
+}
+
+impl<'a> RunCtx<'a> {
+    pub fn new(cancel: &'a CancelToken) -> Self {
+        RunCtx {
+            cancel,
+            #[cfg(feature = "testing")]
+            budget: None,
+        }
+    }
+    /// Testing hook: cancelled() reports true after `n` ticks.
+    #[cfg(feature = "testing")]
+    pub fn with_poll_budget(cancel: &'a CancelToken, budget: &'a std::cell::Cell<u64>) -> Self {
+        RunCtx {
+            cancel,
+            budget: Some(budget),
+        }
+    }
+    pub fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+    /// One cancellation poll (call once per row in long loops).
+    /// Returns true when the run should stop.
+    pub fn tick(&self) -> bool {
+        if self.cancel.is_cancelled() {
+            return true;
+        }
+        #[cfg(feature = "testing")]
+        if let Some(b) = self.budget {
+            let v = b.get().saturating_sub(1);
+            b.set(v);
+            return v == 0;
+        }
+        false
+    }
+}
+
 /// A stage output. `hash` is always `blake3(bytes)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Artifact {
@@ -42,7 +105,8 @@ pub trait Stage {
     /// Canonical parameter bytes (e.g. compact JSON of a typed struct).
     fn params(&self) -> Vec<u8>;
     /// Produce the artifact from upstream artifacts (deps() order).
-    fn run(&self, inputs: &[&Artifact], seed: u64) -> Artifact;
+    /// Long loops should poll `ctx.tick()` and return `Err(Cancelled)`.
+    fn run(&self, inputs: &[&Artifact], seed: u64, ctx: &RunCtx) -> Result<Artifact, Cancelled>;
 }
 
 /// A stage whose output depends only on a self-describing SLICE of its
@@ -61,7 +125,7 @@ pub trait SlicedStage {
     /// computed (it is how reuse is decided); `run` is not.
     fn slice(&self, inputs: &[&Artifact]) -> Vec<u8>;
     /// Produce the artifact from the slice only.
-    fn run(&self, slice: &[u8], seed: u64) -> Artifact;
+    fn run(&self, slice: &[u8], seed: u64, ctx: &RunCtx) -> Result<Artifact, Cancelled>;
 }
 
 #[derive(Debug)]
@@ -398,6 +462,8 @@ pub struct RunReport {
     pub outputs: BTreeMap<String, [u8; 32]>,
     /// Wall time of each executed `run()` call, microseconds.
     pub durations_us: BTreeMap<String, u64>,
+    /// True when the run stopped early because the token was cancelled.
+    pub cancelled: bool,
     /// Cache statistics for the run.
     pub cache: CacheStats,
 }
@@ -506,7 +572,16 @@ impl Pipeline {
 
     /// Run all stages, reusing cached artifacts whose inputs are
     /// unchanged.
-    pub fn run(&self, cache: &mut dyn CacheStore) -> Result<RunReport, PipelineError> {
+    /// Run all stages, reusing cached artifacts whose inputs are
+    /// unchanged. `cancel` is checked before each stage and polled via
+    /// [`RunCtx::tick`] inside long loops; on cancel no partial artifact
+    /// is stored and `cache.finish` runs with ALL stage ids so GC keeps
+    /// still-valid entries for stages that did not run this time.
+    pub fn run(
+        &self,
+        cache: &mut dyn CacheStore,
+        cancel: &CancelToken,
+    ) -> Result<RunReport, PipelineError> {
         let order = self.topo_order()?;
         let mut artifacts: BTreeMap<String, Artifact> = BTreeMap::new();
         let mut report = RunReport {
@@ -515,11 +590,19 @@ impl Pipeline {
             outputs: BTreeMap::new(),
             durations_us: BTreeMap::new(),
             cache: CacheStats::default(),
+            cancelled: false,
         };
         for &i in &order {
+            if cancel.is_cancelled() {
+                report.cache = cache.stats();
+                cache.finish(&self.stage_ids());
+                report.cancelled = true;
+                return Ok(report);
+            }
             let stage = &self.stages[i];
             let id = stage.id().to_string();
             let stage_seed = mb_seed::derive(self.project_seed, "stage", &id);
+            let ctx = RunCtx::new(cancel);
             let inputs: Vec<&Artifact> = stage
                 .deps()
                 .iter()
@@ -548,9 +631,18 @@ impl Pipeline {
                 }
                 None => {
                     let t0 = std::time::Instant::now();
-                    let a = match stage {
-                        StageKind::Normal(s) => s.run(&inputs, stage_seed),
-                        StageKind::Sliced(s) => s.run(&slice.unwrap(), stage_seed),
+                    let r = match stage {
+                        StageKind::Normal(s) => s.run(&inputs, stage_seed, &ctx),
+                        StageKind::Sliced(s) => s.run(&slice.unwrap(), stage_seed, &ctx),
+                    };
+                    let a = match r {
+                        Ok(a) => a,
+                        Err(Cancelled) => {
+                            report.cache = cache.stats();
+                            cache.finish(&self.stage_ids());
+                            report.cancelled = true;
+                            return Ok(report);
+                        }
                     };
                     report
                         .durations_us

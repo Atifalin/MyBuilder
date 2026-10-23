@@ -12,3 +12,6 @@ mb-seed.workspace = true
 mb-seed = { workspace = true, features = ["golden"] }
 [dependencies.serde_json]
 workspace = true
+
+[features]
+testing = []

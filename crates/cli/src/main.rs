@@ -175,8 +175,12 @@ fn cmd_build(dir: &Path, clean: bool, yes: bool) -> Result<ExitCode, String> {
         );
     }
     let t0 = std::time::Instant::now();
-    let rep = mb_terrain::build::build_project(dir, &mb_terrain::build::BuildOptions { clean })
-        .map_err(|e| e.to_string())?;
+    let rep = mb_terrain::build::build_project(
+        dir,
+        &mb_terrain::build::BuildOptions { clean },
+        &mb_pipeline::CancelToken::new(),
+    )
+    .map_err(|e| e.to_string())?;
     // Grouped stage report.
     let (mut g_run, mut c_run, mut r_run) = (0, 0, 0);
     let (mut g_re, mut c_re, mut r_re) = (0, 0, 0);

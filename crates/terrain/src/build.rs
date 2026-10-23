@@ -28,6 +28,8 @@ pub struct WriteReport {
 }
 
 pub struct BuildReport {
+    /// True when the run was cancelled (no outputs were written).
+    pub cancelled: bool,
     pub run: RunReport,
     pub write: WriteReport,
     /// Grid for callers that need it (tests).
@@ -238,7 +240,11 @@ fn collect_outputs(
 
 /// Validate, (optionally clean), run the pipeline against the project's
 /// persistent cache at `<dir>/cache`, write outputs, return the report.
-pub fn build_project(dir: &Path, opts: &BuildOptions) -> Result<BuildReport, BuildError> {
+pub fn build_project(
+    dir: &Path,
+    opts: &BuildOptions,
+    cancel: &mb_pipeline::CancelToken,
+) -> Result<BuildReport, BuildError> {
     let (project, world, diags) = mb_schema::load_project(dir)?;
     if diags
         .iter()
@@ -320,7 +326,24 @@ pub fn build_project(dir: &Path, opts: &BuildOptions) -> Result<BuildReport, Bui
         world.clone(),
         1,
     )));
-    let report = pipe.run(&mut cache)?;
+    let report = pipe.run(&mut cache, cancel)?;
+    if report.cancelled {
+        // No writes on cancel; the cache was already finished inside run.
+        return Ok(BuildReport {
+            run: report,
+            write: WriteReport {
+                written: 0,
+                unchanged: 0,
+                deleted: 0,
+                skipped_unsafe: 0,
+                written_paths: Vec::new(),
+                deleted_paths: Vec::new(),
+            },
+            outputs: FileBundle { files: Vec::new() },
+            grid,
+            cancelled: true,
+        });
+    }
     let ids = pipe.stage_ids();
     cache.finish(&ids);
     let mut owned: Vec<(String, Artifact)> = Vec::new();
@@ -334,6 +357,7 @@ pub fn build_project(dir: &Path, opts: &BuildOptions) -> Result<BuildReport, Bui
     let write = write_outputs(dir, &outputs)?;
     Ok(BuildReport {
         run: report,
+        cancelled: false,
         write,
         grid,
         outputs,

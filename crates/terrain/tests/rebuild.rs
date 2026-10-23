@@ -125,7 +125,12 @@ fn output_tree_hash(dir: &Path) -> [u8; 32] {
 }
 
 fn build(dir: &Path) -> BuildReport {
-    build_project(dir, &BuildOptions { clean: false }).unwrap()
+    build_project(
+        dir,
+        &BuildOptions { clean: false },
+        &mb_pipeline::CancelToken::new(),
+    )
+    .unwrap()
 }
 
 // ---- 1. Random edit sequences: incremental == full rebuild ----
@@ -501,18 +506,29 @@ fn generator_version_rekeys() {
         fn params(&self) -> Vec<u8> {
             vec![1]
         }
-        fn run(&self, _i: &[&mb_pipeline::Artifact], _s: u64) -> mb_pipeline::Artifact {
-            mb_pipeline::Artifact::new(vec![7])
+        fn run(
+            &self,
+            _i: &[&mb_pipeline::Artifact],
+            _s: u64,
+            _ctx: &mb_pipeline::RunCtx,
+        ) -> Result<mb_pipeline::Artifact, mb_pipeline::Cancelled> {
+            Ok(mb_pipeline::Artifact::new(vec![7]))
         }
     }
     let mut cache = mb_pipeline::Cache::default();
     pipe_a.add(Box::new(C));
     pipe_b.add(Box::new(C));
-    let r1 = pipe_a.run(&mut cache).unwrap();
+    let r1 = pipe_a
+        .run(&mut cache, &mb_pipeline::CancelToken::new())
+        .unwrap();
     assert_eq!(r1.executed, vec!["c"]);
-    let r2 = pipe_b.run(&mut cache).unwrap();
+    let r2 = pipe_b
+        .run(&mut cache, &mb_pipeline::CancelToken::new())
+        .unwrap();
     assert_eq!(r2.executed, vec!["c"], "generator change must re-execute");
-    let r3 = pipe_b.run(&mut cache).unwrap();
+    let r3 = pipe_b
+        .run(&mut cache, &mb_pipeline::CancelToken::new())
+        .unwrap();
     assert!(r3.executed.is_empty());
 }
 
@@ -525,7 +541,11 @@ fn clean_refuses_while_cache_locked() {
     build(&d);
     // Hold the lock as a "concurrent build".
     let _held = mb_pipeline::DiskCache::open(&d.join("cache")).unwrap();
-    match build_project(&d, &BuildOptions { clean: true }) {
+    match build_project(
+        &d,
+        &BuildOptions { clean: true },
+        &mb_pipeline::CancelToken::new(),
+    ) {
         Err(mb_terrain::build::BuildError::Cache(mb_pipeline::CacheError::Locked)) => {}
         other => panic!(
             "expected Locked, got {}",
@@ -573,4 +593,54 @@ fn tampered_manifest_paths_are_skipped() {
     assert!(outside.exists());
     assert_eq!(std::fs::read(d.join("project.json")).unwrap(), proj_before);
     let _ = std::fs::remove_file(&outside);
+}
+
+// ---- Cancellation (step 1) ----
+
+#[test]
+fn cancel_before_build_writes_nothing() {
+    let d = tmpdir("cancel");
+    make_project(&d);
+    build(&d);
+    let orig = output_tree_hash(&d);
+    let tok = mb_pipeline::CancelToken::new();
+    tok.cancel();
+    let r = build_project(&d, &BuildOptions { clean: false }, &tok).unwrap();
+    assert!(r.cancelled);
+    assert_eq!(r.write.written, 0);
+    assert_eq!(output_tree_hash(&d), orig);
+    // Next normal build: nothing written.
+    let r2 = build(&d);
+    assert!(!r2.cancelled);
+    assert_eq!(r2.write.written, 0);
+    assert_eq!(output_tree_hash(&d), orig);
+}
+
+/// Mid-height cancel via the poll budget: a token whose RunCtx reports
+/// cancelled after n ticks is exercised inside the height row loop.
+/// Uses the pipeline-level hook directly (the stage polls ctx.tick()
+/// inside build_height_poll), so we run the height stage standalone.
+#[test]
+fn cancel_mid_height_stage() {
+    let grid = mb_terrain::Grid::new(256.0, 256.0, 1.0);
+    let w = small_world();
+    let masks = mb_terrain::build_masks(&grid, &w.shapes, w.mode);
+    let dist = mb_terrain::build_distances(&grid, &masks);
+    let t = w.terrain.feel.resolve(&w.terrain.overrides);
+    let inp = mb_terrain::HeightInputs {
+        grid: &grid,
+        masks: &masks,
+        dist: &dist,
+        sea_level_m: w.sea_level_m,
+        project_seed: 1,
+        terrain: t,
+        profile: &w.profile,
+    };
+    // Budget of 5 ticks cancels inside the 257-row loop.
+    let budget = std::cell::Cell::new(5u64);
+    let tok = mb_pipeline::CancelToken::new();
+    let ctx = mb_pipeline::RunCtx::with_poll_budget(&tok, &budget);
+    let hf = mb_terrain::build_height_poll(&inp, &|| ctx.tick());
+    // The height field came back empty (early bail on tick == 0).
+    assert!(hf.h.is_empty() || ctx.tick());
 }

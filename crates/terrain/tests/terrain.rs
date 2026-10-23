@@ -360,7 +360,9 @@ fn pipeline_stages_produce_bundle() {
     pipe.add(Box::new(HeightStage::new(g, p.clone(), w.clone(), 1)));
     pipe.add(Box::new(ExportStage::new(g, p, w, 1)));
     let mut cache = Cache::default();
-    let r = pipe.run(&mut cache).unwrap();
+    let r = pipe
+        .run(&mut cache, &mb_pipeline::CancelToken::new())
+        .unwrap();
     assert_eq!(r.executed.len(), 4);
     let pipe_bundle = FileBundle::decode(&cache.get("world.export").unwrap().bytes);
     let direct = bundle();
@@ -735,7 +737,8 @@ fn sliced_region_chunk_matches_full_region() {
             cz,
         );
         let rs = mb_terrain::slice::decode_region_slice(&slice);
-        let art = mb_terrain::region_slice::run_region_chunk(&g, &rs, &w, region, 1, cx, cz);
+        let art =
+            mb_terrain::region_slice::run_region_chunk(&g, &rs, &w, region, 1, cx, cz, &|| false);
         assert_eq!(
             art.bytes[mb_terrain::stages::CHUNK_HEADER..],
             old_glb[..],

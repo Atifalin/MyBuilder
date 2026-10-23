@@ -24,6 +24,7 @@ pub fn run_region_chunk(
     seed: u64,
     cx: usize,
     cz: usize,
+    poll: &dyn Fn() -> bool,
 ) -> Artifact {
     let cells_per_chunk = (world.chunk_size_m / grid.cell) as usize;
     let div = region.cell_divisor as usize;
@@ -72,6 +73,9 @@ pub fn run_region_chunk(
     let mut h = vec![0.0; nx_f * nx_f];
     let mut w = vec![0.0; nx_f * nx_f];
     for j in 0..nx_f {
+        if poll() {
+            return Artifact::new(Vec::new());
+        }
         for i in 0..nx_f {
             let idx = j * nx_f + i;
             let (x, z) = (fx(i), fz(j));
@@ -120,6 +124,9 @@ pub fn run_region_chunk(
     let mut norms = vec![[0.0f32; 3]; nx_f * nx_f];
     let d2 = 2.0 * fsp;
     for j in 0..nx_f {
+        if poll() {
+            return Artifact::new(Vec::new());
+        }
         for i in 0..nx_f {
             let idx = j * nx_f + i;
             let (x, z) = (fx(i), fz(j));

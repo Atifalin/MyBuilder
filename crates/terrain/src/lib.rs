@@ -75,6 +75,18 @@ pub struct Masks {
 /// extent in land_first mode when there are none, empty in water_first),
 /// minus water shapes. Mountain/forest = union of their shapes.
 pub fn build_masks(grid: &Grid, shapes: &[mb_schema::Shape], mode: mb_schema::WorldMode) -> Masks {
+    build_masks_poll(grid, shapes, mode, &|| false)
+}
+
+/// `build_masks` with a per-row cancellation hook: returns early (with
+/// partial data — callers must treat the result as garbage) once `poll`
+/// reports true.
+pub fn build_masks_poll(
+    grid: &Grid,
+    shapes: &[mb_schema::Shape],
+    mode: mb_schema::WorldMode,
+    poll: &dyn Fn() -> bool,
+) -> Masks {
     use mb_schema::ShapeKind;
     let mut land = vec![0u8; grid.len()];
     let mut mountain = vec![0u8; grid.len()];
@@ -92,7 +104,7 @@ pub fn build_masks(grid: &Grid, shapes: &[mb_schema::Shape], mode: mb_schema::Wo
             ShapeKind::Mountain => &mut mountain,
             ShapeKind::Forest => &mut forest,
         };
-        rasterize(grid, &shape.points, dst);
+        rasterize(grid, &shape.points, dst, poll);
     }
     for i in 0..grid.len() {
         if water[i] == 1 {
@@ -109,12 +121,15 @@ pub fn build_masks(grid: &Grid, shapes: &[mb_schema::Shape], mode: mb_schema::Wo
 /// Even-odd scanline fill. For each node row, collect edge x-crossings
 /// (half-open vertex rule min(z0,z1) <= z < max(z0,z1)), sort, then fill
 /// spans pairwise with x_left <= x < x_right.
-fn rasterize(grid: &Grid, points: &[[f64; 2]], dst: &mut [u8]) {
+fn rasterize(grid: &Grid, points: &[[f64; 2]], dst: &mut [u8], poll: &dyn Fn() -> bool) {
     if points.len() < 3 {
         return;
     }
     let n = points.len();
     for j in 0..grid.nz {
+        if poll() {
+            return;
+        }
         let z = grid.z(j);
         let mut xs = Vec::new();
         for e in 0..n {
@@ -255,6 +270,12 @@ pub struct Distances {
 }
 
 pub fn build_distances(grid: &Grid, masks: &Masks) -> Distances {
+    build_distances_poll(grid, masks, &|| false)
+}
+
+/// `build_distances` with a per-row cancellation hook (see
+/// [`build_masks_poll`]).
+pub fn build_distances_poll(grid: &Grid, masks: &Masks, poll: &dyn Fn() -> bool) -> Distances {
     // Coast distance: EDT of land for non-land samples, EDT of !land for
     // land samples; shift by half a cell so the coastline sits between
     // nodes, not on them.
@@ -277,6 +298,12 @@ pub fn build_distances(grid: &Grid, masks: &Masks) -> Distances {
     }
     let not_mountain: Vec<u8> = masks.mountain.iter().map(|&m| 1 - m).collect();
     let mut mountain = vec![0.0; grid.len()];
+    if poll() {
+        return Distances {
+            coast: Vec::new(),
+            mountain: Vec::new(),
+        };
+    }
     if let Some(d2) = squared_edt(grid, &not_mountain) {
         for i in 0..grid.len() {
             mountain[i] = d2[i].sqrt() * grid.cell;
@@ -412,6 +439,12 @@ pub struct HeightField {
 }
 
 pub fn build_height(inp: &HeightInputs) -> HeightField {
+    build_height_poll(inp, &|| false)
+}
+
+/// `build_height` with a per-row cancellation hook (see
+/// [`build_masks_poll`]).
+pub fn build_height_poll(inp: &HeightInputs, poll: &dyn Fn() -> bool) -> HeightField {
     let g = inp.grid;
     let terrain = inp.terrain;
     let ctx = HeightCtx::new(
@@ -426,6 +459,13 @@ pub fn build_height(inp: &HeightInputs) -> HeightField {
     // come from the shared formula origin + i*spacing everywhere.
     let mut h = vec![0.0; g.len()];
     for j in 0..g.nz {
+        if poll() {
+            return HeightField {
+                h: Vec::new(),
+                h_min: 0.0,
+                h_max: 0.0,
+            };
+        }
         for i in 0..g.nx {
             h[j * g.nx + i] = ctx.height_at(g.x(i), g.z(j));
         }

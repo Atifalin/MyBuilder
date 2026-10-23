@@ -1,0 +1,12 @@
+[package]
+name = "mb-schema"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+mb-seed = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+mb-seed = { workspace = true, features = ["golden"] }

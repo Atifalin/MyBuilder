@@ -1,0 +1,10 @@
+[package]
+name = "mb-geom"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mb-seed.workspace = true
+
+[dev-dependencies]
+mb-seed = { workspace = true, features = ["golden"] }

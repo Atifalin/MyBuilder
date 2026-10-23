@@ -237,13 +237,12 @@ impl From<std::io::Error> for CacheError {
 /// Persistent, content-addressed cache in `<dir>`:
 ///   `<dir>/index.json` — sorted {stage id: {key, artifact}} hex map
 ///   `<dir>/blobs/<artifact hex>.bin` — artifact bytes
-///   `<dir>/.lock` — exclusive advisory lock held while open; the OS
-/// releases it when the process dies, so there are no stale locks.
 /// Writes are atomic (temp file + rename); reads verify blake3.
+/// Concurrency: `DiskCache` does NOT lock — callers must hold the
+/// project-level lock (`.mybuilder.lock`, see mb-terrain `ProjectLock`)
+/// for the whole build.
 pub struct DiskCache {
     dir: PathBuf,
-    /// Held for the lock's lifetime; dropped (unlocked) with the cache.
-    _lock: std::fs::File,
     /// stage id -> (input hash, artifact hash)
     index: BTreeMap<String, ([u8; 32], [u8; 32])>,
     stats: CacheStats,
@@ -265,21 +264,10 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 }
 
 impl DiskCache {
-    /// Open (creating if needed) the cache in `dir`, taking the exclusive
-    /// lock. Returns [`CacheError::Locked`] if another process holds it.
+    /// Open (creating if needed) the cache in `dir`. Does NOT lock —
+    /// callers must hold the project lock for the whole build.
     pub fn open(dir: &Path) -> Result<DiskCache, CacheError> {
         std::fs::create_dir_all(dir.join("blobs"))?;
-        let lock_path = dir.join(".lock");
-        let lock = std::fs::File::create(&lock_path)?;
-        // Stable on our toolchain; WouldBlock means another build holds it.
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Err(CacheError::Locked),
-            Err(std::fs::TryLockError::Error(e)) => return Err(CacheError::Io(e)),
-        }
-        use std::io::Write;
-        let mut f = &lock;
-        let _ = writeln!(f, "{}", std::process::id());
         let index_path = dir.join("index.json");
         let mut index = BTreeMap::new();
         if let Ok(text) = std::fs::read_to_string(&index_path)
@@ -296,7 +284,6 @@ impl DiskCache {
         }
         Ok(DiskCache {
             dir: dir.to_path_buf(),
-            _lock: lock,
             index,
             stats: CacheStats::default(),
         })

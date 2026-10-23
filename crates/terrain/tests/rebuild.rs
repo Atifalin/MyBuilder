@@ -127,7 +127,10 @@ fn output_tree_hash(dir: &Path) -> [u8; 32] {
 fn build(dir: &Path) -> BuildReport {
     build_project(
         dir,
-        &BuildOptions { clean: false },
+        &BuildOptions {
+            clean: false,
+            cache_dir: Some(dir.join(".test-cache")),
+        },
         &mb_pipeline::CancelToken::new(),
     )
     .unwrap()
@@ -214,7 +217,7 @@ fn random_edits_match_full_rebuild() {
             write_world(&b, &w);
             let ra = build(&a);
             // B: wipe cache + outputs -> full rebuild
-            let _ = std::fs::remove_dir_all(b.join("cache"));
+            let _ = std::fs::remove_dir_all(b.join(".test-cache"));
             let rb = build(&b);
             let (ha, hb) = (output_tree_hash(&a), output_tree_hash(&b));
             assert_eq!(
@@ -443,7 +446,7 @@ fn corrupt_blob_forces_rerun() {
     build(&d);
     let orig = output_tree_hash(&d);
     // Flip a byte in one blob.
-    let blobs = d.join("cache/blobs");
+    let blobs = d.join(".test-cache/blobs");
     let victim = std::fs::read_dir(&blobs)
         .unwrap()
         .next()
@@ -462,16 +465,18 @@ fn corrupt_blob_forces_rerun() {
 // ---- 5. Lock ----
 
 #[test]
-fn disk_cache_lock() {
+fn project_lock() {
     let d = tmpdir("lock");
-    let c1 = mb_pipeline::DiskCache::open(&d).unwrap();
-    match mb_pipeline::DiskCache::open(&d) {
-        Err(mb_pipeline::CacheError::Locked) => {}
-        Err(mb_pipeline::CacheError::Io(e)) => panic!("expected Locked, got Io {e}"),
-        Ok(_) => panic!("expected Locked, got Ok"),
+    let l1 = mb_terrain::build::ProjectLock::acquire(&d).unwrap();
+    match mb_terrain::build::ProjectLock::acquire(&d) {
+        Err(mb_terrain::build::BuildError::Locked) => {}
+        other => panic!(
+            "expected Locked, got {}",
+            other.map(|_| "Ok").unwrap_or_else(|_| "?")
+        ),
     }
-    drop(c1);
-    let _c2 = mb_pipeline::DiskCache::open(&d).unwrap();
+    drop(l1);
+    let _l2 = mb_terrain::build::ProjectLock::acquire(&d).unwrap();
 }
 
 // ---- 6. generator_version invalidates everything ----
@@ -540,13 +545,16 @@ fn clean_refuses_while_cache_locked() {
     make_project(&d);
     build(&d);
     // Hold the lock as a "concurrent build".
-    let _held = mb_pipeline::DiskCache::open(&d.join("cache")).unwrap();
+    let _held = mb_terrain::build::ProjectLock::acquire(&d).unwrap();
     match build_project(
         &d,
-        &BuildOptions { clean: true },
+        &BuildOptions {
+            clean: true,
+            cache_dir: Some(d.join(".test-cache")),
+        },
         &mb_pipeline::CancelToken::new(),
     ) {
-        Err(mb_terrain::build::BuildError::Cache(mb_pipeline::CacheError::Locked)) => {}
+        Err(mb_terrain::build::BuildError::Locked) => {}
         other => panic!(
             "expected Locked, got {}",
             other.map(|_| "Ok").unwrap_or_else(|e| {
@@ -557,9 +565,14 @@ fn clean_refuses_while_cache_locked() {
             })
         ),
     }
-    // Nothing under cache/ or exports/ was removed.
-    assert!(d.join("cache/index.json").exists());
-    assert!(std::fs::read_dir(d.join("cache/blobs")).unwrap().count() > 0);
+    // Nothing under the cache dir or exports/ was removed.
+    assert!(d.join(".test-cache/index.json").exists());
+    assert!(
+        std::fs::read_dir(d.join(".test-cache/blobs"))
+            .unwrap()
+            .count()
+            > 0
+    );
     assert!(d.join("exports/terrain/manifest.json").exists());
 }
 
@@ -605,7 +618,15 @@ fn cancel_before_build_writes_nothing() {
     let orig = output_tree_hash(&d);
     let tok = mb_pipeline::CancelToken::new();
     tok.cancel();
-    let r = build_project(&d, &BuildOptions { clean: false }, &tok).unwrap();
+    let r = build_project(
+        &d,
+        &BuildOptions {
+            clean: false,
+            cache_dir: Some(d.join(".test-cache")),
+        },
+        &tok,
+    )
+    .unwrap();
     assert!(r.cancelled);
     assert_eq!(r.write.written, 0);
     assert_eq!(output_tree_hash(&d), orig);
@@ -643,4 +664,94 @@ fn cancel_mid_height_stage() {
     let hf = mb_terrain::build_height_poll(&inp, &|| ctx.tick());
     // The height field came back empty (early bail on tick == 0).
     assert!(hf.h.is_empty() || ctx.tick());
+}
+
+// ---- Step 2 hardening: drive/UNC rejects + symlink delete barriers ----
+
+#[test]
+fn drive_and_unc_paths_rejected() {
+    let d = tmpdir("drives");
+    make_project(&d);
+    build(&d);
+    let m = d.join("exports/terrain/manifest.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&m).unwrap()).unwrap();
+    v["chunks"] = serde_json::json!([
+        {"file": "C:\\x"},
+        {"file": "C:x"},
+        {"file": "c:/x"},
+        {"file": "\\\\server\\share\\x"},
+        {"file": "//server/share/x"},
+        {"file": "\\\\?\\C:\\x"},
+        {"file": "\\\\.\\pipe\\x"},
+    ]);
+    std::fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let r = build(&d);
+    assert!(
+        r.write.skipped_unsafe >= 7,
+        "skipped_unsafe={}",
+        r.write.skipped_unsafe
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_file_is_never_deleted() {
+    use std::os::unix::fs::symlink;
+    let d = tmpdir("symfile");
+    make_project(&d);
+    build(&d);
+    let _orig = output_tree_hash(&d);
+    // A symlinked file listed as a stale entry in the manifest.
+    let target = d.join("real_chunk.bin");
+    let bytes = b"precious";
+    std::fs::write(&target, bytes).unwrap();
+    let link = d.join("exports/terrain/evil.txt");
+    symlink(&target, &link).unwrap();
+    // Tamper the manifest to list evil.txt -> it becomes a stale
+    // output on the next build (it's not in the new set).
+    let m = d.join("exports/terrain/manifest.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&m).unwrap()).unwrap();
+    v["chunks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"file": "evil.txt"}));
+    std::fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let r = build(&d);
+    assert!(
+        r.write.skipped_unsafe >= 1,
+        "skipped={}",
+        r.write.skipped_unsafe
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_dir_never_deletes_target() {
+    use std::os::unix::fs::symlink;
+    let d = tmpdir("symdir");
+    make_project(&d);
+    build(&d);
+    // exports/terrain becomes a symlink to an outside dir.
+    let outside = tmpdir("symdir_out");
+    let victim = outside.join("keep.bin");
+    std::fs::write(&victim, b"precious").unwrap();
+    std::fs::rename(d.join("exports/terrain"), d.join("exports/terrain_real")).unwrap();
+    symlink(&outside.0, d.join("exports/terrain")).unwrap();
+    // Tamper manifest so all chunks are "stale".
+    let m = d.join("exports/terrain_real/manifest.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&m).unwrap()).unwrap();
+    v["chunks"] = serde_json::json!([{"file": "keep.bin"}]);
+    std::fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    // Put the manifest where the build will read it: inside the symlink.
+    std::fs::copy(&m, outside.join("manifest.json")).unwrap();
+    let _r = build(&d);
+    assert!(victim.exists(), "target dir must be untouched");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
 }

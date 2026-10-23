@@ -11,6 +11,7 @@ rm -rf "$PROJ"
 cargo run -q --release -p mb-cli -- new "$PROJ" --seed 0000000000000001 >/dev/null
 cp scripts/fixtures/s4-world.json "$PROJ/recipes/world.json"
 echo "== build =="
+cargo run -q --release -p mb-cli -- cache-path "$PROJ" | sed "s/^/cache: /"
 cargo run -q --release -p mb-cli -- build "$PROJ"
 MANIFEST="$PROJ/exports/terrain/manifest.json"
 [ -d "$DEMO/.godot" ] || "$GODOT_BIN" --headless --path "$DEMO" --import >/dev/null 2>&1 || true

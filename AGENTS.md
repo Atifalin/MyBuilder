@@ -13,10 +13,18 @@ required components.
 
 ## Build engine (S10)
 
-- `mybuilder build` uses a persistent cache at `<project>/cache/`:
-  `index.json` (stage id -> {key, artifact hash}), `blobs/<hash>.bin`,
-  `.lock` (exclusive advisory lock; OS releases it on process death).
+- `mybuilder build` uses a persistent cache in the OS cache dir
+  (`<os cache>/MyBuilder/projects/<name>-<16hex>/`, CACHEDIR.TAG at the
+  root). Resolve with `mybuilder cache-path <dir>`; override via
+  `--cache-dir` / `MB_CACHE_DIR` (env read by the CLI only). Layout:
+  `index.json` (stage id -> {key, artifact hash}), `blobs/<hash>.bin`.
   Blobs are blake3-verified on load; corrupt/missing -> re-run.
+  Concurrency is the project-level `.mybuilder.lock` (OS advisory
+  lock, pid inside; `.gitignore`d by `new`). DiskCache itself does
+  not lock — callers must hold the project lock.
+- Deletes never follow symlinks: every stale-file delete walks each
+  component with symlink_metadata and canonicalizes the parent; writes
+  still follow symlinks (exports/ may point into a Godot project).
 - Sliced stages (`world.chunk.*`, `world.region.*.chunk.*`) may ONLY read
   their slice — the run fn receives the slice bytes, so the cache key
   provably covers every input byte. Chunks use a 1-sample edge apron

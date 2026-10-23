@@ -5,7 +5,7 @@
 //! ```text
 //! project.json        ProjectFile
 //! recipes/world.json  WorldRecipe
-//! layers/ overrides/ cache/ styles/ previews/ exports/
+//! layers/ overrides/ styles/ previews/ exports/
 //! ```
 
 use std::collections::BTreeSet;
@@ -1022,14 +1022,7 @@ fn validate_regions(world: &WorldRecipe, cell_size_m: f64, out: &mut Vec<Diagnos
 // ---------------------------------------------------------------------
 
 pub const PROJECT_FILE: &str = "project.json";
-pub const SUBDIRS: [&str; 6] = [
-    "layers",
-    "overrides",
-    "cache",
-    "styles",
-    "previews",
-    "exports",
-];
+pub const SUBDIRS: [&str; 5] = ["layers", "overrides", "styles", "previews", "exports"];
 
 fn write_pretty(path: &Path, value: &impl Serialize) -> Result<(), SchemaError> {
     let mut text = serde_json::to_string_pretty(value)?;
@@ -1057,6 +1050,8 @@ pub fn create_project(
         std::fs::write(d.join(".gitkeep"), "")?;
     }
     write_pretty(&project_path, project)?;
+    // The build lock is machine-local state; never commit it.
+    std::fs::write(dir.join(".gitignore"), ".mybuilder.lock\n")?;
     let world_path = dir.join(&project.recipes.world);
     if let Some(parent) = world_path.parent() {
         std::fs::create_dir_all(parent)?;

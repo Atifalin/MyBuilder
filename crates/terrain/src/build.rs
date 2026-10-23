@@ -3,7 +3,7 @@
 //! sliced + manifest), runs it against a persistent DiskCache, writes
 //! outputs atomically, cleans stale files, and reports.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mb_pipeline::{Artifact, CacheStore, DiskCache, Pipeline, RunReport};
 use mb_schema::WorldRecipe;
@@ -14,6 +14,9 @@ use crate::stages::*;
 pub struct BuildOptions {
     /// `mybuilder build --clean --yes`: wipe cache + listed outputs first.
     pub clean: bool,
+    /// Cache location override; None = OS cache dir per project.
+    /// Tests must ALWAYS set this — never write to the real user cache.
+    pub cache_dir: Option<PathBuf>,
 }
 
 pub struct WriteReport {
@@ -30,6 +33,8 @@ pub struct WriteReport {
 pub struct BuildReport {
     /// True when the run was cancelled (no outputs were written).
     pub cancelled: bool,
+    /// Info-level diagnostics (e.g. legacy cache dir).
+    pub diagnostics: Vec<mb_schema::Diagnostic>,
     pub run: RunReport,
     pub write: WriteReport,
     /// Grid for callers that need it (tests).
@@ -40,6 +45,8 @@ pub struct BuildReport {
 
 #[derive(Debug)]
 pub enum BuildError {
+    /// `.mybuilder.lock` is held by another process.
+    Locked,
     Schema(mb_schema::SchemaError),
     Validation(Vec<mb_schema::Diagnostic>),
     Pipeline(mb_pipeline::PipelineError),
@@ -60,6 +67,7 @@ impl std::fmt::Display for BuildError {
             BuildError::Pipeline(e) => write!(f, "{e}"),
             BuildError::Cache(e) => write!(f, "{e}"),
             BuildError::Io(e) => write!(f, "{e}"),
+            BuildError::Locked => write!(f, "another build is running on this project"),
         }
     }
 }
@@ -142,6 +150,32 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Compare-and-write all files; manifest goes LAST. Files listed in the
 /// previous manifest/layers.json but not in the new set are deleted
 /// (only files we listed — never anything else under exports/).
+/// Filesystem barrier before deleting `dir/rel`: no path component
+/// from the project root down (final file included) may be a symlink,
+/// and the canonicalized parent must stay inside the canonicalized
+/// project dir. NOTE: this applies to DELETES only — writes still
+/// follow symlinks on purpose (users may symlink exports/ into a Godot
+/// project).
+fn safe_to_delete(dir: &Path, rel: &str) -> bool {
+    let canon_root = match dir.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut cur = dir.to_path_buf();
+    for comp in std::path::Path::new(rel).components() {
+        cur.push(comp.as_os_str());
+        if let Ok(md) = std::fs::symlink_metadata(&cur)
+            && md.file_type().is_symlink()
+        {
+            return false;
+        }
+    }
+    match cur.parent().and_then(|p| p.canonicalize().ok()) {
+        Some(p) => p.starts_with(&canon_root),
+        None => false,
+    }
+}
+
 fn write_outputs(dir: &Path, outputs: &FileBundle) -> std::io::Result<WriteReport> {
     let prev = previous_outputs(dir);
     let mut rep = WriteReport {
@@ -184,7 +218,7 @@ fn write_outputs(dir: &Path, outputs: &FileBundle) -> std::io::Result<WriteRepor
     }
     for (rel, entry_safe) in prev {
         if !new_set.contains(&rel) {
-            if !entry_safe || !confined(&rel) {
+            if !entry_safe || !confined(&rel) || !safe_to_delete(dir, &rel) {
                 rep.skipped_unsafe += 1;
                 continue;
             }
@@ -240,6 +274,91 @@ fn collect_outputs(
 
 /// Validate, (optionally clean), run the pipeline against the project's
 /// persistent cache at `<dir>/cache`, write outputs, return the report.
+/// Exclusive project-level build lock on `<project>/.mybuilder.lock`
+/// (OS advisory: flock/LockFileEx). Held for the whole build, so it
+/// covers outputs AND the cache. The pid is written for diagnostics
+/// only; the OS releases the lock on process death.
+pub struct ProjectLock(#[allow(dead_code)] std::fs::File);
+
+impl ProjectLock {
+    pub fn acquire(dir: &Path) -> Result<ProjectLock, BuildError> {
+        let path = dir.join(".mybuilder.lock");
+        let mut f = std::fs::File::create(&path)?;
+        use std::io::Write as _;
+        if f.try_lock().is_err() {
+            return Err(BuildError::Locked);
+        }
+        let _ = write!(f, "{}", std::process::id());
+        Ok(ProjectLock(f))
+    }
+}
+
+/// Resolve the OS cache dir for a project:
+/// `<os cache>/MyBuilder/projects/<sanitized name>-<16 hex of
+/// blake3(canonical abs project path)>`. Env vars only, no dirs crate.
+pub fn cache_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(home).join("Library/Caches")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").expect("HOME not set")).join(".cache")
+            })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .expect("LOCALAPPDATA not set")
+    }
+}
+
+/// The resolved cache dir for a project (default OS location).
+/// Also writes the standard CACHEDIR.TAG marker once.
+pub fn project_cache_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    let canon = dir.canonicalize()?;
+    let name = canon
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let tag = mb_seed::hash_bytes(canon.to_string_lossy().as_bytes());
+    let id = format!(
+        "{}-{}",
+        safe,
+        tag.iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    let root = cache_root().join("MyBuilder");
+    std::fs::create_dir_all(&root)?;
+    let tagf = root.join("CACHEDIR.TAG");
+    if !tagf.exists() {
+        write_atomic(
+            &tagf,
+            b"Signature: 8a477f597d28d172789f06886806bc55
+# For information about cache directory tags see https://bford.info/cachedir/
+",
+        )?;
+    }
+    Ok(root.join("projects").join(id))
+}
+
 pub fn build_project(
     dir: &Path,
     opts: &BuildOptions,
@@ -252,14 +371,30 @@ pub fn build_project(
     {
         return Err(BuildError::Validation(diags));
     }
-    let cache_dir = dir.join("cache");
-    // Take the lock BEFORE any deletion so --clean can't clobber a
-    // concurrent build.
+    // Project-level lock covers outputs AND the cache for the whole
+    // build — take it BEFORE any deletion.
+    let _lock = ProjectLock::acquire(dir)?;
+    let cache_dir = opts
+        .cache_dir
+        .clone()
+        .map(|c| if c.is_absolute() { c } else { dir.join(c) })
+        .unwrap_or_else(|| project_cache_dir(dir).unwrap_or_else(|_| dir.join("cache")));
+    let mut info: Vec<mb_schema::Diagnostic> = Vec::new();
+    if dir.join("cache/index.json").exists() {
+        info.push(mb_schema::Diagnostic {
+            severity: mb_schema::Severity::Info,
+            code: "project.cache.legacy_dir",
+            path: "cache/".to_string(),
+            message: "project-local cache/ is no longer used; safe to delete".to_string(),
+            suggestion: None,
+        });
+    }
     let mut cache = DiskCache::open(&cache_dir)?;
     if opts.clean {
         cache.clear();
         for (rel, entry_safe) in previous_outputs(dir) {
-            if entry_safe && mb_schema::confined_rel_path_is_safe(&rel) {
+            if entry_safe && mb_schema::confined_rel_path_is_safe(&rel) && safe_to_delete(dir, &rel)
+            {
                 let _ = std::fs::remove_file(dir.join(rel));
             }
         }
@@ -330,6 +465,7 @@ pub fn build_project(
     if report.cancelled {
         // No writes on cancel; the cache was already finished inside run.
         return Ok(BuildReport {
+            diagnostics: info,
             run: report,
             write: WriteReport {
                 written: 0,
@@ -356,6 +492,7 @@ pub fn build_project(
     let outputs = collect_outputs(&lookup, &grid, &world);
     let write = write_outputs(dir, &outputs)?;
     Ok(BuildReport {
+        diagnostics: info,
         run: report,
         cancelled: false,
         write,

@@ -276,9 +276,16 @@ Import a built world (checks object count, world bounds, height range):
 
 ## Rebuilds and the persistent cache (S10)
 
-`mybuilder build` keeps a content-addressed cache in `<project>/cache/`
-(`index.json` + `blobs/`, guarded by a `.lock` file — a second build on
-the same project fails fast with "another build is running"). Chunk
+`mybuilder build` keeps a content-addressed cache in the OS cache dir —
+`<os cache>/MyBuilder/projects/<name>-<16-hex>/` (macOS
+`~/Library/Caches`, Linux `$XDG_CACHE_HOME`/`~/.cache`, Windows
+`%LOCALAPPDATA%`) so cloud-sync tools never touch it. Print it with
+`mybuilder cache-path <dir>`; override with `--cache-dir` or
+`MB_CACHE_DIR`. `.mybuilder.lock` in the project is an OS advisory lock
+held for the whole build — a concurrent build fails fast with
+"another build is running on this project". Output deletes never follow
+symlinks; writes still do (exports/ may be symlinked into a Godot
+project). Chunk
 stages are sliced, so edits re-run only the affected chunks plus their
 edge neighbours (shared borders need neighbouring normals).
 

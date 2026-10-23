@@ -52,7 +52,12 @@ enum Command {
         /// Confirm --clean.
         #[arg(long)]
         yes: bool,
+        /// Override the cache location (default: OS cache dir).
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
     },
+    /// Print the resolved cache directory for a project.
+    CachePath { dir: PathBuf },
     /// Set generator_version to the current one.
     Upgrade { dir: PathBuf },
 }
@@ -167,7 +172,18 @@ fn cmd_info(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_build(dir: &Path, clean: bool, yes: bool) -> Result<ExitCode, String> {
+fn cmd_cache_path(dir: &Path) -> Result<ExitCode, String> {
+    let p = mb_terrain::build::project_cache_dir(dir).map_err(|e| e.to_string())?;
+    println!("{}", p.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_build(
+    dir: &Path,
+    clean: bool,
+    yes: bool,
+    cache_dir: Option<PathBuf>,
+) -> Result<ExitCode, String> {
     if clean && !yes {
         return Err(
             "--clean deletes cache/ and all previously listed outputs; pass --yes to confirm"
@@ -175,12 +191,17 @@ fn cmd_build(dir: &Path, clean: bool, yes: bool) -> Result<ExitCode, String> {
         );
     }
     let t0 = std::time::Instant::now();
+    // Env override is read here only — libraries never read env vars.
+    let cache_dir = cache_dir.or_else(|| std::env::var_os("MB_CACHE_DIR").map(PathBuf::from));
     let rep = mb_terrain::build::build_project(
         dir,
-        &mb_terrain::build::BuildOptions { clean },
+        &mb_terrain::build::BuildOptions { clean, cache_dir },
         &mb_pipeline::CancelToken::new(),
     )
     .map_err(|e| e.to_string())?;
+    for d in &rep.diagnostics {
+        println!("{} {} {}: {}", d.severity, d.code, d.path, d.message);
+    }
     // Grouped stage report.
     let (mut g_run, mut c_run, mut r_run) = (0, 0, 0);
     let (mut g_re, mut c_re, mut r_re) = (0, 0, 0);
@@ -306,7 +327,13 @@ fn main() -> ExitCode {
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),
         Command::Probe => Ok(cmd_probe()),
-        Command::Build { dir, clean, yes } => cmd_build(&dir, clean, yes),
+        Command::Build {
+            dir,
+            clean,
+            yes,
+            cache_dir,
+        } => cmd_build(&dir, clean, yes, cache_dir),
+        Command::CachePath { dir } => cmd_cache_path(&dir),
         Command::Upgrade { dir } => cmd_upgrade(&dir),
     };
     match result {

@@ -436,6 +436,9 @@ pub struct HydrologySection {
     pub max_half_width_m: f64,
     #[serde(default = "h_mslope")]
     pub min_bed_slope: f64,
+    /// Minimum river half-width in meters (width floor for small streams).
+    #[serde(default = "h_minw")]
+    pub river_min_half_width_m: f64,
 }
 fn h_catch() -> f64 {
     150000.0
@@ -458,6 +461,9 @@ fn h_maxw() -> f64 {
 fn h_mslope() -> f64 {
     0.0005
 }
+fn h_minw() -> f64 {
+    2.0
+}
 impl Default for HydrologySection {
     fn default() -> Self {
         Self {
@@ -468,6 +474,7 @@ impl Default for HydrologySection {
             carve_width_m: 6.0,
             max_half_width_m: 30.0,
             min_bed_slope: 0.0005,
+            river_min_half_width_m: 2.0,
         }
     }
 }

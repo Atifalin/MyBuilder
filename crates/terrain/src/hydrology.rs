@@ -56,6 +56,21 @@ pub struct Hydro {
     /// dry nodes the nearest wet node's level (so water mesh edges
     /// don't sag). NO_WATER where no wet node exists at all.
     pub water_surface: Vec<f64>,
+    /// River flow velocity as (x, z) pairs in world units/s — the
+    /// acc-weighted mean of D8 receiver directions over the 3x3
+    /// neighbourhood, normalised and scaled by sqrt(acc/acc_max).
+    /// Zero for lakes, sea and dry nodes.
+    pub flow: Vec<f64>,
+    /// Kind of the nearest wet node per node: 1 river, 2 lake, 0 none
+    /// (same nearest-site source as water_surface).
+    pub surface_kind: Vec<u8>,
+    /// Distance beyond the nearest river's half-width in meters
+    /// (river_dist - halfw, clamped >= 0) — the river sand band input.
+    pub rsand: Vec<f64>,
+    /// Flood-fill cover: nodes at/below a lake's level, connected to that
+    /// lake through below-level nodes (the depression fringe the lake
+    /// mask's depth/area thresholds exclude).
+    pub lake_cover: Vec<u8>,
 }
 
 const N8: [(isize, isize); 8] = [
@@ -237,7 +252,8 @@ pub fn run(
             river[c] = 1;
             let q = (acc[c] / t.river_min_catchment_m2).sqrt();
             depth[c] = (t.carve_depth_m * q).min(4.0 * t.carve_depth_m);
-            halfw[c] = (t.carve_width_m * q).min(t.max_half_width_m);
+            halfw[c] =
+                (t.river_min_half_width_m * q).clamp(t.river_min_half_width_m, t.max_half_width_m);
             bed[c] = filled[c] - depth[c];
         }
     }
@@ -301,8 +317,84 @@ pub fn run(
             water[c] = bed[c] + 0.8 * depth[c];
         }
     }
+    // Lake coverage: multi-source BFS from lake nodes carrying each
+    // seed's level; expands through below-level neighbours.
+    let mut lake_cover = vec![0u8; n];
+    {
+        let mut q = std::collections::VecDeque::new();
+        let mut lvl = vec![0.0f64; n];
+        for c in 0..n {
+            if is_lake(c) {
+                lake_cover[c] = 1;
+                lvl[c] = water[c];
+                q.push_back(c);
+            }
+        }
+        while let Some(c) = q.pop_front() {
+            let lv = lvl[c];
+            let (ci, cj) = (c % nx, c / nx);
+            for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                let (ii, jj) = (ci as i64 + di, cj as i64 + dj);
+                if ii < 0 || jj < 0 || ii >= nx as i64 || jj >= nz as i64 {
+                    continue;
+                }
+                let k = (jj as usize) * nx + ii as usize;
+                // Depression membership: raised by the fill
+                // (enclosed bowl), or at/near the level (rim cell);
+                // bounded by lv so the BFS can't leak down the
+                // outlet valley or into a different, deeper bowl.
+                if lake_cover[k] == 0
+                    && (filled[k] - h[k] > 1e-6 || h[k] >= lv - 1e-3)
+                    && filled[k] <= lv + 1e-3
+                {
+                    lake_cover[k] = 1;
+                    lvl[k] = lv;
+                    q.push_back(k);
+                }
+            }
+        }
+    }
     tp("water", t0);
+    let mut skind = vec![0u8; n];
+    // Flow field: for each river node, the acc-weighted sum of its
+    // 3x3 neighbours' unit receiver directions, normalised; speed
+    // 0.3 + 1.2*sqrt(acc/acc_max) clamped to <= 1.5 units/s.
+    let acc_max = acc.iter().fold(0.0f64, |a, &v| a.max(v)).max(1.0);
+    let mut flow = vec![0.0; n * 2];
+    for c in 0..n {
+        if river[c] != 1 {
+            continue;
+        }
+        let (ci, cj) = (c % nx, c / nx);
+        let (mut fx, mut fz) = (0.0, 0.0);
+        for dj in -1i64..=1 {
+            for di in -1i64..=1 {
+                let (ii, jj) = (ci as i64 + di, cj as i64 + dj);
+                if ii < 0 || jj < 0 || ii >= nx as i64 || jj >= nz as i64 {
+                    continue;
+                }
+                let q = (jj as usize) * nx + ii as usize;
+                if river[q] != 1 || recv[q] == usize::MAX {
+                    continue;
+                }
+                let (ri, rj) = (recv[q] % nx, recv[q] / nx);
+                let (dx, dz) = (ri as f64 - ii as f64, rj as f64 - jj as f64);
+                let len = (dx * dx + dz * dz).sqrt();
+                if len > 0.0 {
+                    fx += acc[q] * dx / len;
+                    fz += acc[q] * dz / len;
+                }
+            }
+        }
+        let len = (fx * fx + fz * fz).sqrt();
+        if len > 0.0 {
+            let speed = (0.3 + 1.2 * (acc[c] / acc_max).sqrt()).min(1.5);
+            flow[c * 2] = fx / len * speed;
+            flow[c * 2 + 1] = fz / len * speed;
+        }
+    }
     Hydro {
+        flow,
         final_h,
         delta,
         water: water.clone(),
@@ -338,6 +430,18 @@ pub fn run(
                 }
             }
             let (_d, sites) = nearest_site_edt(&wet, nx, nz);
+            skind = (0..n)
+                .map(|c| {
+                    let s = sites[c];
+                    if s == usize::MAX {
+                        0
+                    } else if river[s] == 1 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .collect();
             (0..n)
                 .map(|c| {
                     if wet[c] == 1 {
@@ -350,6 +454,18 @@ pub fn run(
                 })
                 .collect()
         },
+        surface_kind: skind,
+        lake_cover,
+        rsand: (0..n)
+            .map(|c| {
+                let s = site[c];
+                if s == usize::MAX {
+                    f64::MAX
+                } else {
+                    (dist[c] - halfw[s]).max(0.0)
+                }
+            })
+            .collect(),
     }
 }
 
@@ -366,6 +482,10 @@ fn empty(n: usize) -> Hydro {
         bed: vec![0.0; n],
         water_dist: vec![0.0; n],
         water_surface: vec![0.0; n],
+        flow: vec![0.0; n * 2],
+        surface_kind: vec![0; n],
+        rsand: vec![0.0; n],
+        lake_cover: vec![0; n],
     }
 }
 

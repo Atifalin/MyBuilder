@@ -49,32 +49,55 @@ static func load_world(manifest_path: String, parent: Node) -> Dictionary:
 			var wstate := GLTFState.new()
 			if wdoc.append_from_file(wpath, wstate) == OK:
 				var wscene := wdoc.generate_scene(wstate)
-				var wmat := StandardMaterial3D.new()
-				wmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-				wmat.albedo_color = Color(0.1, 0.35, 0.65, 0.6)
-				wmat.roughness = 0.1
 				wscene.set_meta("mb_water", true)
-				_apply_override(wscene, wmat)
+				_apply_override(wscene, _water_material())
 				world_root.add_child(wscene)
 				res["water"] += 1
-	# Translucent sea plane at manifest sea level, extended past the world
-	# extent so the seafloor terrain never shows through the horizon.
-	var sea := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	var w: float = manifest["extent"]["width_m"]
-	var d: float = manifest["extent"]["depth_m"]
-	plane.size = Vector2(w, d) * 2.0
-	sea.mesh = plane
-	var sea_mat := StandardMaterial3D.new()
-	sea_mat.albedo_color = Color(0.05, 0.25, 0.5, 0.7)
-	sea_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	sea_mat.roughness = 0.15
-	sea.material_override = sea_mat
-	sea.position = Vector3(0, manifest["sea_level_m"], 0)
-	sea.set_meta("mb_sea", true)
-	world_root.add_child(sea)
+	# Sea: gen-3 manifests carry a real sea_ring.glb; older manifests get
+	# the fallback translucent plane.
+	if manifest.has("sea"):
+		var spath := base_dir.path_join(manifest["sea"]["file"])
+		var sdoc := GLTFDocument.new()
+		var sstate := GLTFState.new()
+		if sdoc.append_from_file(spath, sstate) == OK:
+			var sscene := sdoc.generate_scene(sstate)
+			sscene.set_meta("mb_sea", true)
+			_apply_override(sscene, _water_material())
+			world_root.add_child(sscene)
+			res["sea_ring"] = true
+	else:
+		var sea := MeshInstance3D.new()
+		var plane := PlaneMesh.new()
+		var w: float = manifest["extent"]["width_m"]
+		var d: float = manifest["extent"]["depth_m"]
+		plane.size = Vector2(w, d) * 2.0
+		sea.mesh = plane
+		var sea_mat := StandardMaterial3D.new()
+		sea_mat.albedo_color = Color(0.05, 0.25, 0.5, 0.7)
+		sea_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		sea_mat.roughness = 0.15
+		sea.material_override = sea_mat
+		sea.position = Vector3(0, manifest["sea_level_m"], 0)
+		sea.set_meta("mb_sea", true)
+		world_root.add_child(sea)
 	res["root"] = world_root
 	return res
+
+# Water ShaderMaterial with two procedurally-seeded ripple normal maps.
+static func _water_material() -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://water.gdshader")
+	for i in [1, 2]:
+		var noise := FastNoiseLite.new()
+		noise.seed = 41 + i * 7
+		noise.frequency = 0.08 * i
+		noise.noise_type = FastNoiseLite.TYPE_PERLIN
+		var nt := NoiseTexture2D.new()
+		nt.seamless = true
+		nt.as_normal_map = true
+		nt.noise = noise
+		mat.set_shader_parameter("ripple%d" % i, nt)
+	return mat
 
 static func _apply_override(node: Node, mat: Material) -> void:
 	if node is MeshInstance3D:

@@ -313,6 +313,7 @@ pub fn region_chunk_mesh(
         colors: Vec::with_capacity(vside * vside),
         indices: Vec::with_capacity(per * per * 6),
         uv2: Vec::new(),
+        colors4: Vec::new(),
         origin: [ox, 0.0, oz],
         vertex_count: vside * vside,
         triangle_count: per * per * 2,
@@ -338,7 +339,7 @@ pub fn region_chunk_mesh(
                 let ddz = (hi(fi, fj + 1) - hi(fi, fj.saturating_sub(1))) / d2;
                 let gmag = (ddx * ddx + ddz * ddz).sqrt();
                 let d = ctx.coast_at(x, z);
-                let w = crate::splat_weights(h, gmag, d, sea_level_m, snow_line_m, tex);
+                let w = crate::splat_weights(h, gmag, d, f64::MAX, sea_level_m, snow_line_m, tex);
                 let pal = [GRASS, SAND, ROCK, SNOW];
                 let mut c = [0.0f32; 3];
                 for k in 0..4 {

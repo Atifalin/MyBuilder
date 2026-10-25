@@ -601,6 +601,14 @@ pub struct HydroPlanes {
     pub water_dist: Vec<f64>,
     pub water_surface: Vec<f64>,
     pub lakes: Vec<(u32, f64, f64)>,
+    /// River flow velocity (x,z pairs, 0 for non-river nodes).
+    pub flow: Vec<f64>,
+    /// Kind of the nearest wet node (1 river, 2 lake, 0 none).
+    pub surface_kind: Vec<u8>,
+    /// Flood-fill below-level lake coverage mask.
+    pub lake_cover: Vec<u8>,
+    /// Distance beyond the nearest river's half-width (m).
+    pub rsand: Vec<f64>,
 }
 pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
     let mut o = 0;
@@ -634,6 +642,20 @@ pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
         o += 8;
         lakes.push((id, level, area));
     }
+    let flow = if o + n * 16 <= b.len() {
+        get_f64s(b, &mut o, n * 2)
+    } else {
+        vec![0.0; n * 2]
+    };
+    let (surface_kind, lake_cover, rsand) = if o + 2 * n + n * 8 <= b.len() {
+        let k = b[o..o + n].to_vec();
+        o += n;
+        let lc = b[o..o + n].to_vec();
+        o += n;
+        (k, lc, get_f64s(b, &mut o, n))
+    } else {
+        (vec![0; n], vec![0; n], vec![f64::MAX; n])
+    };
     (
         nx,
         nz,
@@ -648,6 +670,10 @@ pub fn decode_hydro(b: &[u8]) -> (usize, usize, f64, HydroPlanes) {
             water_dist,
             water_surface,
             lakes,
+            flow,
+            surface_kind,
+            lake_cover,
+            rsand,
         },
     )
 }
@@ -716,6 +742,16 @@ impl Stage for HydrologyStage {
             b.extend_from_slice(&id.to_le_bytes());
             b.extend_from_slice(&lv.to_le_bytes());
             b.extend_from_slice(&area.to_le_bytes());
+        }
+        // code_version 2 tail: flow velocity field (x,z f64 pairs),
+        // v3: surface_kind u8 + river-beyond-halfwidth rsand f64.
+        for v in &hydro.flow {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&hydro.surface_kind);
+        b.extend_from_slice(&hydro.lake_cover);
+        for v in &hydro.rsand {
+            b.extend_from_slice(&v.to_le_bytes());
         }
         Ok(Artifact::new(b))
     }
@@ -787,6 +823,7 @@ impl Stage for LayersStage {
                             hf.h[idx],
                             g,
                             coast[idx],
+                            f64::MAX,
                             self.world.sea_level_m,
                             self.world.profile.snow_line_m,
                             &self.world.texturing,
@@ -924,8 +961,22 @@ impl mb_pipeline::SlicedStage for ChunkStage {
         };
         let _ = (nx, nz);
         let cells_per_chunk = (self.world.chunk_size_m / self.grid.cell) as usize;
+        #[allow(clippy::type_complexity)]
+        let mut extra: Option<(Vec<u8>, Vec<f64>, Vec<u8>, Vec<f64>, Vec<u8>)> = None;
         let water: Option<(Vec<f64>, Vec<f64>, Vec<f64>)> = if self.project.generator_version >= 3 {
             let hp = decode_hydro(&inputs[0].bytes).3;
+            let kind: Vec<u8> = (0..hp.river.len())
+                .map(|c| {
+                    if hp.river[c] == 1 {
+                        1
+                    } else if hp.lake[c] != 0 {
+                        2
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            extra = Some((kind, hp.flow, hp.surface_kind, hp.rsand, hp.lake_cover));
             Some((hp.water_dist, hp.water_surface, hp.water))
         } else {
             None
@@ -940,6 +991,15 @@ impl mb_pipeline::SlicedStage for ChunkStage {
             water
                 .as_ref()
                 .map(|(a, b, c)| (a.as_slice(), b.as_slice(), c.as_slice())),
+            extra.as_ref().map(|(k, f, sk, rs, lc)| {
+                (
+                    k.as_slice(),
+                    f.as_slice(),
+                    sk.as_slice(),
+                    rs.as_slice(),
+                    lc.as_slice(),
+                )
+            }),
         )
     }
     fn run(&self, slice: &[u8], _seed: u64, _ctx: &RunCtx) -> Result<Artifact, Cancelled> {
@@ -1010,6 +1070,7 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                             cs.h_at(gi, gj),
                             g,
                             cs.water_dist_at(gi, gj),
+                            cs.river_sand_at(gi, gj),
                             self.world.sea_level_m,
                             self.world.profile.snow_line_m,
                             &self.world.texturing,
@@ -1041,6 +1102,7 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                     uvs: Vec::new(),
                     colors: Vec::new(),
                     uv2: Vec::new(),
+                    colors4: Vec::new(),
                     indices: Vec::new(),
                     origin: mesh.origin,
                     vertex_count: 0,
@@ -1049,11 +1111,16 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                 let ox = self.grid.x(self.cx * cells_per_chunk);
                 let oz = self.grid.z(self.cz * cells_per_chunk);
                 let mut vidx = vec![u32::MAX; side * side];
+                let sea = self.world.sea_level_m;
+                let depth01 = |level: f64, gi: usize, gj: usize| {
+                    ((level - cs.h_at(gi, gj)) / 8.0).clamp(0.0, 1.0)
+                };
                 let emit_vert = |wm: &mut crate::mesh::ChunkMesh,
                                  vidx: &mut [u32],
                                  vi: usize,
                                  vj: usize,
-                                 side: usize|
+                                 side: usize,
+                                 borrow_lake: bool|
                  -> u32 {
                     let cur = vidx[vj * side + vi];
                     if cur != u32::MAX {
@@ -1064,8 +1131,19 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                         self.cz * cells_per_chunk + vj * step,
                     );
                     let mut level = cs.water_at(gi, gj); // wet level or borrowed
-                    if !cs.is_wet(gi, gj) {
-                        level = level.min(cs.h_at(gi, gj)); // dry: don't float
+                    // kind of the wet SOURCE: lake-source verts (incl.
+                    // the fringe below lake level) keep lake level.
+                    let kind = if cs.is_wet(gi, gj) {
+                        cs.kind_at(gi, gj)
+                    } else {
+                        cs.skind_at(gi, gj)
+                    };
+                    // River-sourced rim clamps to terrain; lake-sourced
+                    // stays at lake level only while inside the filled
+                    // depression — outside it the sheet flushes onto the
+                    // bank (the pour/downhill side must not float).
+                    if !cs.is_wet(gi, gj) && (kind != 2 || cs.lake_cover_at(gi, gj) != 1) {
+                        level = level.min(cs.h_at(gi, gj));
                     }
                     let id = wm.positions.len() as u32;
                     vidx[vj * side + vi] = id;
@@ -1077,7 +1155,23 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                     wm.normals.push([0.0, 1.0, 0.0]);
                     wm.uvs
                         .push([self.grid.x(gi) as f32, self.grid.z(gj) as f32]);
-                    wm.colors.push([0.1, 0.35, 0.65]);
+                    let (fx, fz) = if kind == 1 {
+                        cs.flow_at(gi, gj)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    wm.uv2.push([fx as f32, fz as f32]);
+                    wm.colors4.push([
+                        depth01(level, gi, gj) as f32,
+                        match kind {
+                            1 => 1.0,
+                            2 => 0.5,
+                            _ if borrow_lake => 0.5, // lake rim stays a lake
+                            _ => 0.0,
+                        },
+                        0.0,
+                        1.0,
+                    ]);
                     id
                 };
                 let wet = |vi: usize, vj: usize| {
@@ -1086,23 +1180,138 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                         self.cz * cells_per_chunk + vj * step,
                     )
                 };
+                // Lake coverage: every node whose borrowed surface is a
+                // lake AND is at/below that lake's level is covered; the
+                // 4-neighbour check adds one ring beyond so the
+                // terrain/water intersection is always inside the mesh
+                // (flood-fill guarantees the boundary has h >= level).
+                let lakey = |vi: usize, vj: usize| -> bool {
+                    let (gi, gj) = (
+                        self.cx * cells_per_chunk + vi * step,
+                        self.cz * cells_per_chunk + vj * step,
+                    );
+                    cs.lake_cover_at(gi, gj) == 1
+                };
+                let lakeish = |vi: usize, vj: usize| -> bool {
+                    for (di, dj) in [(0i64, 0i64), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+                        let ii = vi as i64 + di;
+                        let jj = vj as i64 + dj;
+                        if ii < 0 || jj < 0 || ii >= side as i64 || jj >= side as i64 {
+                            continue;
+                        }
+                        if lakey(ii as usize, jj as usize) {
+                            return true;
+                        }
+                    }
+                    false
+                };
                 for vj in 0..side - 1 {
                     for vi in 0..side - 1 {
+                        let lakey = lakeish(vi, vj)
+                            || lakeish(vi + 1, vj)
+                            || lakeish(vi, vj + 1)
+                            || lakeish(vi + 1, vj + 1);
                         if !(wet(vi, vj)
                             || wet(vi + 1, vj)
                             || wet(vi, vj + 1)
-                            || wet(vi + 1, vj + 1))
+                            || wet(vi + 1, vj + 1)
+                            || lakey)
                         {
                             continue;
                         }
-                        let a = emit_vert(&mut wm, &mut vidx, vi, vj, side);
-                        let b = emit_vert(&mut wm, &mut vidx, vi + 1, vj, side);
-                        let c = emit_vert(&mut wm, &mut vidx, vi, vj + 1, side);
-                        let d = emit_vert(&mut wm, &mut vidx, vi + 1, vj + 1, side);
-                        if wet(vi, vj) || wet(vi, vj + 1) || wet(vi + 1, vj) {
+                        let a = emit_vert(&mut wm, &mut vidx, vi, vj, side, lakey);
+                        let b = emit_vert(&mut wm, &mut vidx, vi + 1, vj, side, lakey);
+                        let c = emit_vert(&mut wm, &mut vidx, vi, vj + 1, side, lakey);
+                        let d = emit_vert(&mut wm, &mut vidx, vi + 1, vj + 1, side, lakey);
+                        // Skip tris fully at/below sea level — the sea
+                        // quads cover them and they'd z-fight.
+                        let ymax = |id: u32| wm.positions[id as usize][1];
+                        let low = |tri: [u32; 3]| tri.iter().all(|&v| ymax(v) as f64 <= sea + 0.01);
+                        if (wet(vi, vj) || wet(vi, vj + 1) || wet(vi + 1, vj) || lakey)
+                            && !low([a, c, b])
+                        {
                             wm.indices.extend_from_slice(&[a, c, b]);
                         }
-                        if wet(vi + 1, vj) || wet(vi, vj + 1) || wet(vi + 1, vj + 1) {
+                        if (wet(vi + 1, vj) || wet(vi, vj + 1) || wet(vi + 1, vj + 1) || lakey)
+                            && !low([b, c, d])
+                        {
+                            wm.indices.extend_from_slice(&[b, c, d]);
+                        }
+                    }
+                }
+                // Sea quads on a coarse SEA_STEP grid: a quad is emitted
+                // when any corner OR any mesh_step terrain sample inside
+                // it is below sea level. Flat at sea level; the engine
+                // depth test hides the part under the terrain.
+                const SEA_STEP: usize = 16;
+                debug_assert!(cells_per_chunk.is_multiple_of(SEA_STEP));
+                let sstep = SEA_STEP / step.max(1); // in mesh-step units
+                if cells_per_chunk.is_multiple_of(SEA_STEP) && sstep >= 1 {
+                    let nside = cells_per_chunk / SEA_STEP;
+                    let below = |vi: usize, vj: usize| {
+                        // corner check at stride nodes + interior samples
+                        let (gi, gj) = (
+                            self.cx * cells_per_chunk + vi * step,
+                            self.cz * cells_per_chunk + vj * step,
+                        );
+                        cs.h_at(gi, gj) < sea
+                    };
+                    let emit_sea = |wm: &mut crate::mesh::ChunkMesh, vi: usize, vj: usize| -> u32 {
+                        let (gi, gj) = (
+                            self.cx * cells_per_chunk + vi * step,
+                            self.cz * cells_per_chunk + vj * step,
+                        );
+                        wm.positions.push([
+                            (self.grid.x(gi) - ox) as f32,
+                            sea as f32,
+                            (self.grid.z(gj) - oz) as f32,
+                        ]);
+                        wm.normals.push([0.0, 1.0, 0.0]);
+                        wm.uvs
+                            .push([self.grid.x(gi) as f32, self.grid.z(gj) as f32]);
+                        wm.uv2.push([0.0, 0.0]);
+                        wm.colors4
+                            .push([depth01(sea, gi, gj) as f32, 0.0, 0.0, 1.0]);
+                        (wm.positions.len() - 1) as u32
+                    };
+                    // Vert dedup across quads via a side² map at sstep stride.
+                    let mut sv = vec![u32::MAX; side * side];
+                    for qj in 0..nside {
+                        for qi in 0..nside {
+                            // Quad corners in mesh-step units.
+                            let (x0, x1) = (qi * sstep, (qi + 1) * sstep);
+                            let (z0, z1) = (qj * sstep, (qj + 1) * sstep);
+                            // Corner or interior-sample below sea?
+                            let mut any =
+                                below(x0, z0) || below(x1, z0) || below(x0, z1) || below(x1, z1);
+                            if !any {
+                                'scan: for sj in z0..z1 {
+                                    for si in x0..x1 {
+                                        if below(si, sj) {
+                                            any = true;
+                                            break 'scan;
+                                        }
+                                    }
+                                }
+                            }
+                            if !any {
+                                continue;
+                            }
+                            let mut v =
+                                |wm: &mut crate::mesh::ChunkMesh, vi: usize, vj: usize| -> u32 {
+                                    let cur = sv[vj * side + vi];
+                                    if cur != u32::MAX {
+                                        return cur;
+                                    }
+                                    let id = emit_sea(wm, vi, vj);
+                                    sv[vj * side + vi] = id;
+                                    id
+                                };
+                            let a = v(&mut wm, x0, z0);
+                            let b = v(&mut wm, x1, z0);
+                            let c = v(&mut wm, x0, z1);
+                            let d = v(&mut wm, x1, z1);
+                            wm.indices.extend_from_slice(&[a, c, b]);
                             wm.indices.extend_from_slice(&[b, c, d]);
                         }
                     }
@@ -1486,6 +1695,10 @@ impl Stage for ManifestStage {
                 if let Some(lj) = layers_json {
                     j["lakes"] = lj["lakes"].clone();
                 }
+                j["sea"] = serde_json::json!({
+                    "file": "water/sea_ring.glb",
+                    "level": self.world.sea_level_m,
+                });
                 Artifact::new(serde_json::to_vec(&j).unwrap())
             } else {
                 Artifact::new(bytes)

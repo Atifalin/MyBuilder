@@ -761,7 +761,7 @@ fn sliced_region_chunk_matches_full_region() {
         );
     }
     // And the coarse chunk slice path matches chunk_mesh + glb.
-    let cs = mb_terrain::slice::encode_chunk_slice(&g, &hf, &dist.coast, 128, 0, 0, None);
+    let cs = mb_terrain::slice::encode_chunk_slice(&g, &hf, &dist.coast, 128, 0, 0, None, None);
     let cdec = mb_terrain::slice::decode_chunk_slice(&cs);
     let h_at = |i: usize, j: usize| cdec.h_at(i, j);
     let n_at =

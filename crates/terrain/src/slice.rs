@@ -34,6 +34,16 @@ pub struct ChunkSlice {
     /// Gen >= 3: water surface level per node — wet nodes' own level,
     /// dry nodes' nearest-wet level (mesh edges don't sag).
     pub water_surface: Vec<f64>,
+    /// Water kind per node — 0 dry, 1 river, 2 lake.
+    pub kind: Vec<u8>,
+    /// River flow velocity (x,z pairs) per node.
+    pub flow: Vec<f64>,
+    /// Kind of the nearest wet node (borrowed-source kind for dry rim).
+    pub skind: Vec<u8>,
+    /// Meters beyond the nearest river's half-width (f64::MAX far away).
+    pub rsand: Vec<f64>,
+    /// Flood-fill below-level lake coverage mask.
+    pub lcov: Vec<u8>,
 }
 
 impl ChunkSlice {
@@ -99,6 +109,51 @@ impl ChunkSlice {
             && self.water[(j - self.j0) * self.ni + (i - self.i0)] != crate::hydrology::NO_WATER
     }
 
+    /// Water kind: 0 dry/sea, 1 river, 2 lake.
+    pub fn kind_at(&self, i: usize, j: usize) -> u8 {
+        if self.kind.is_empty() {
+            0
+        } else {
+            self.kind[(j - self.j0) * self.ni + (i - self.i0)]
+        }
+    }
+
+    /// Kind of the nearest wet source node (1 river, 2 lake, 0 none).
+    pub fn skind_at(&self, i: usize, j: usize) -> u8 {
+        if self.skind.is_empty() {
+            0
+        } else {
+            self.skind[(j - self.j0) * self.ni + (i - self.i0)]
+        }
+    }
+
+    /// Lake coverage mask at a node (below a lake's level, connected).
+    pub fn lake_cover_at(&self, i: usize, j: usize) -> u8 {
+        if self.lcov.is_empty() {
+            0
+        } else {
+            self.lcov[(j - self.j0) * self.ni + (i - self.i0)]
+        }
+    }
+
+    /// Meters beyond the nearest river's half-width (MAX if no river).
+    pub fn river_sand_at(&self, i: usize, j: usize) -> f64 {
+        if self.rsand.is_empty() {
+            f64::MAX
+        } else {
+            self.rsand[(j - self.j0) * self.ni + (i - self.i0)]
+        }
+    }
+
+    /// River flow velocity (x,z) at a node; (0,0) off-river.
+    pub fn flow_at(&self, i: usize, j: usize) -> (f64, f64) {
+        if self.flow.is_empty() {
+            return (0.0, 0.0);
+        }
+        let k = ((j - self.j0) * self.ni + (i - self.i0)) * 2;
+        (self.flow[k], self.flow[k + 1])
+    }
+
     /// Water surface level for the MESH vertex at (i, j): the node's
     /// own level when wet, else the nearest wet node's level so the
     /// mesh edge doesn't sag. NO_WATER only when no wet node exists.
@@ -115,6 +170,11 @@ impl ChunkSlice {
 /// planes. Header: i0, j0, ni, nj (u32 LE), apron flags (u8:
 /// W=1,E=2,S=4,N=8); then node-range f64s, aprons (W,E,S,N order),
 /// then the coast node-range f64s.
+/// Gen-3 per-node water planes for the chunk slice: kind, flow (x,z
+/// pairs), surface kind, river sand distance, lake cover.
+pub type WaterExtra<'a> = (&'a [u8], &'a [f64], &'a [u8], &'a [f64], &'a [u8]);
+
+#[allow(clippy::too_many_arguments)]
 pub fn encode_chunk_slice(
     grid: &Grid,
     hf: &HeightField,
@@ -123,6 +183,7 @@ pub fn encode_chunk_slice(
     cx: usize,
     cz: usize,
     water: Option<(&[f64], &[f64], &[f64])>,
+    extra: Option<WaterExtra<'_>>,
 ) -> Vec<u8> {
     let i0 = cx * cells_per_chunk;
     let j0 = cz * cells_per_chunk;
@@ -199,6 +260,40 @@ pub fn encode_chunk_slice(
         }
         None => out.push(0),
     }
+    // Trailing flag 2: kind u8 plane + flow (x,z) f64 pairs.
+    match extra {
+        Some((kind, flow, skind, rsand, lcov)) => {
+            out.push(3);
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.push(kind[j * grid.nx + i]);
+                }
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let k = (j * grid.nx + i) * 2;
+                    out.extend_from_slice(&flow[k].to_le_bytes());
+                    out.extend_from_slice(&flow[k + 1].to_le_bytes());
+                }
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.push(skind[j * grid.nx + i]);
+                }
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.extend_from_slice(&rsand[j * grid.nx + i].to_le_bytes());
+                }
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.push(lcov[j * grid.nx + i]);
+                }
+            }
+        }
+        None => out.push(0),
+    }
     out
 }
 
@@ -231,6 +326,19 @@ pub fn decode_chunk_slice(b: &[u8]) -> ChunkSlice {
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
+    let (kind, flow, skind, rsand, lcov) = if o < b.len() && b[o] == 3 {
+        o += 1;
+        let kind = b[o..o + ni * nj].to_vec();
+        o += ni * nj;
+        let flow = take(ni * nj * 2, &mut o);
+        let skind = b[o..o + ni * nj].to_vec();
+        o += ni * nj;
+        let rs = take(ni * nj, &mut o);
+        let lcov = b[o..o + ni * nj].to_vec();
+        (kind, flow, skind, rs, lcov)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
     ChunkSlice {
         i0,
         j0,
@@ -245,6 +353,11 @@ pub fn decode_chunk_slice(b: &[u8]) -> ChunkSlice {
         water_dist,
         water,
         water_surface,
+        kind,
+        flow,
+        skind,
+        rsand,
+        lcov,
     }
 }
 

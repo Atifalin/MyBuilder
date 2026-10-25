@@ -797,22 +797,22 @@ fn splat_weights_rules() {
     use mb_terrain::splat_weights;
     let t = mb_schema::TexturingSection::default();
     // Steep -> rock dominant.
-    let w = splat_weights(50.0, 5.0, 10.0, 0.0, 80.0, &t);
+    let w = splat_weights(50.0, 5.0, 10.0, f64::MAX, 0.0, 80.0, &t);
     assert!(w[2] > 0.99 && w.iter().sum::<f64>() - 1.0 < 1e-6);
     // Flat, near coast, low -> sand present.
-    let w = splat_weights(1.0, 0.0, 10.0, 0.0, 80.0, &t);
+    let w = splat_weights(1.0, 0.0, 10.0, f64::MAX, 0.0, 80.0, &t);
     assert!(w[1] > 0.5, "sand at coast: {w:?}");
     // High flat -> snow; steep -> no snow.
-    let w = splat_weights(120.0, 0.0, 500.0, 0.0, 80.0, &t);
+    let w = splat_weights(120.0, 0.0, 500.0, f64::MAX, 0.0, 80.0, &t);
     assert!(w[3] > 0.9, "snow above line: {w:?}");
-    let w = splat_weights(120.0, 5.0, 500.0, 0.0, 80.0, &t);
+    let w = splat_weights(120.0, 5.0, 500.0, f64::MAX, 0.0, 80.0, &t);
     assert!(w[3] < 0.05 && w[2] > 0.9, "steep: rock not snow: {w:?}");
     // Underwater -> sand.
-    let w = splat_weights(-5.0, 0.0, 10.0, 0.0, 80.0, &t);
+    let w = splat_weights(-5.0, 0.0, 10.0, f64::MAX, 0.0, 80.0, &t);
     assert_eq!(w, [0.0, 1.0, 0.0, 0.0]);
     // Sum is always 1.
     for (h, g, c) in [(0.0, 0.0, 0.0), (40.0, 0.5, 30.0), (200.0, 1.0, 500.0)] {
-        let w = splat_weights(h, g, c, 0.0, 80.0, &t);
+        let w = splat_weights(h, g, c, f64::MAX, 0.0, 80.0, &t);
         assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-6, "{w:?}");
     }
 }
@@ -1404,6 +1404,265 @@ fn glb_vertices(glb: &[u8]) -> Vec<[f32; 3]> {
     out
 }
 
+// Decode any GLB accessor's f32 data as [f32; N]-wide rows.
+fn glb_attr_f32(glb: &[u8], idx: usize, width: usize) -> Vec<Vec<f32>> {
+    let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+    let acc = &j["accessors"][idx];
+    let bv = acc["bufferView"].as_u64().unwrap() as usize;
+    let off = j["bufferViews"][bv]["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let count = acc["count"].as_u64().unwrap() as usize;
+    let bin_start = 20 + jl + ((4 - jl % 4) % 4) + 8;
+    (0..count)
+        .map(|i| {
+            (0..width)
+                .map(|k| {
+                    f32::from_le_bytes(
+                        glb[bin_start + off + (i * width + k) * 4
+                            ..bin_start + off + (i * width + k) * 4 + 4]
+                            .try_into()
+                            .unwrap(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn gen3_water_polish_attrs() {
+    // New water polish: COLOR_0 VEC4 (depth01, kind, 0, 1), TEXCOORD_1
+    // flow, sea verts exactly at sea level, sea_ring in the manifest.
+    let d = gen3_dir("wpa");
+    build(&d);
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("exports/terrain/manifest.json")).unwrap())
+            .unwrap();
+    let _sea_unused = m["sea_level_m"].as_f64().unwrap() as f32;
+    // sea_ring exists, listed, and reaches 4x the half extent.
+    assert_eq!(m["sea"]["file"], "water/sea_ring.glb");
+    let ring = std::fs::read(d.join("exports/terrain/water/sea_ring.glb")).unwrap();
+    let ringv = glb_vertices(&ring);
+    let hw = ringv
+        .iter()
+        .fold(0.0f32, |a, v| a.max(v[0].abs()).max(v[2].abs()));
+    let lj: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("layers/layers.json")).unwrap()).unwrap();
+    let half = (lj["nx"].as_f64().unwrap() - 1.0) * lj["cell_size_m"].as_f64().unwrap() / 2.0;
+    assert!(hw as f64 >= 4.0 * half - 1.0, "sea ring too small: {hw}");
+    for c in m["chunks"].as_array().unwrap() {
+        let f = c["water"]["file"].as_str();
+        let Some(f) = f else { continue };
+        let glb = std::fs::read(d.join(format!("exports/terrain/{f}"))).unwrap();
+        let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+        let attrs = &j["meshes"][0]["primitives"][0]["attributes"];
+        let ci = attrs["COLOR_0"].as_u64().unwrap() as usize;
+        let ti = attrs["TEXCOORD_1"].as_u64().unwrap() as usize;
+        let accs = j["accessors"].as_array().unwrap();
+        assert_eq!(accs[ci]["type"], "VEC4");
+        assert_eq!(accs[ci]["count"], accs[0]["count"]);
+        assert_eq!(accs[ti]["count"], accs[0]["count"]);
+        let colors = glb_attr_f32(&glb, ci, 4);
+        let flow = glb_attr_f32(&glb, ti, 2);
+        for (k, c) in colors.iter().enumerate() {
+            // r = depth01 in [0,1]; g = kind 0/0.5/1; b = 0; a = 1.
+            assert!(c[0] >= 0.0 && c[0] <= 1.0 + 1e-6);
+            assert!(c[2] == 0.0 && c[3] == 1.0);
+            // kind sea / dry rim (0) and lake (0.5) have zero flow;
+            // river (1) may flow — the downhill assertion lives in the
+            // layers-driven test.
+            if c[1] != 1.0 {
+                assert!(flow[k][0] == 0.0 && flow[k][1] == 0.0);
+            }
+        }
+    }
+    // At least one river vertex carries non-zero flow.
+    let mut any_flow = false;
+    for c in m["chunks"].as_array().unwrap() {
+        if let Some(f) = c["water"]["file"].as_str() {
+            let glb = std::fs::read(d.join(format!("exports/terrain/{f}"))).unwrap();
+            let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+            let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+            let attrs = &j["meshes"][0]["primitives"][0]["attributes"];
+            let ti = attrs["TEXCOORD_1"].as_u64().unwrap() as usize;
+            for v in glb_attr_f32(&glb, ti, 2) {
+                if v[0] != 0.0 || v[1] != 0.0 {
+                    any_flow = true;
+                }
+            }
+        }
+    }
+    assert!(any_flow, "no river flow found in any water GLB");
+    // Sea vertices (kind 0 emitted on the 16 m sea grid) are exactly at
+    // sea level — checked via positions at sea_level f32.
+    let sea = m["sea_level_m"].as_f64().unwrap() as f32;
+    let mut any_sea = false;
+    for c in m["chunks"].as_array().unwrap() {
+        if let Some(f) = c["water"]["file"].as_str() {
+            for v in glb_vertices(&std::fs::read(d.join(format!("exports/terrain/{f}"))).unwrap()) {
+                if (v[1] - sea).abs() < 1e-4 {
+                    any_sea = true;
+                }
+            }
+        }
+    }
+    assert!(any_sea, "no sea-level water vertex found");
+    // Lake sheets must sit at their level: <=3% of a lake's water
+    // triangles may have a vertex lowered below level-0.05 (the
+    // legitimate outlet-side spill only).
+    {
+        let levels: Vec<f64> = m["lakes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["level"].as_f64().unwrap())
+            .collect();
+        let (mut below, mut total) = (0usize, 0usize);
+        for c in m["chunks"].as_array().unwrap() {
+            let Some(f) = c["water"]["file"].as_str() else {
+                continue;
+            };
+            let glb = std::fs::read(d.join(format!("exports/terrain/{f}"))).unwrap();
+            let jl2 = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+            let j2: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl2]).unwrap();
+            let attrs2 = &j2["meshes"][0]["primitives"][0]["attributes"];
+            let ci2 = attrs2["COLOR_0"].as_u64().unwrap() as usize;
+            let colors2 = glb_attr_f32(&glb, ci2, 4);
+            let pos2 = glb_vertices(&glb);
+            // the index accessor is appended last by the glb writer.
+            let ia = j2["accessors"].as_array().unwrap().len() - 1;
+            let acc = &j2["accessors"][ia];
+            let bv = acc["bufferView"].as_u64().unwrap() as usize;
+            let off = j2["bufferViews"][bv]["byteOffset"].as_u64().unwrap_or(0) as usize;
+            let cnt = acc["count"].as_u64().unwrap() as usize;
+            let bs = 20 + jl2 + ((4 - jl2 % 4) % 4) + 8;
+            let idxs: Vec<u32> = (0..cnt)
+                .map(|i| {
+                    u32::from_le_bytes(
+                        glb[bs + off + i * 4..bs + off + i * 4 + 4]
+                            .try_into()
+                            .unwrap(),
+                    )
+                })
+                .collect();
+            for t in idxs.chunks(3) {
+                let (a, b, c3) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                // lake triangle = all verts kind .5 (skip sea/river)
+                if !(colors2[a][1] == 0.5 && colors2[b][1] == 0.5 && colors2[c3][1] == 0.5) {
+                    continue;
+                }
+                let lv = pos2[a][1].max(pos2[b][1]).max(pos2[c3][1]);
+                if !levels.iter().any(|&l| (lv as f64 - l).abs() < 0.02) {
+                    continue;
+                }
+                total += 1;
+                if [a, b, c3]
+                    .iter()
+                    .any(|&v| (pos2[v][1] as f64) < lv as f64 - 0.05)
+                {
+                    below += 1;
+                }
+            }
+        }
+        // <=3% lowered (outlets only); the fixture's lakes are tiny,
+        // so a single spill point can be a handful of tris — cap the
+        // absolute count too. The s3 world went 321/1811 -> 11/2490.
+        assert!(
+            total > 0 && (below * 100 <= total * 3 || below <= 3),
+            "lake lowered-vert tris: {below}/{total} (>3%)"
+        );
+    }
+    // Lake coverage: every lake (kind 0.5) water vertex has terrain
+    // at-or-above its level at the mesh boundary (flood-fill property),
+    // or sits at a world-edge vertex.
+    let lnx = lj["nx"].as_u64().unwrap() as usize;
+    let lnz = lj["nz"].as_u64().unwrap() as usize;
+    let cell = lj["cell_size_m"].as_f64().unwrap();
+    let lx0 = lj["origin"][0].as_f64().unwrap();
+    let lz0 = lj["origin"][1].as_f64().unwrap();
+    let h16 = std::fs::read(d.join("layers/height.r16")).unwrap();
+    let hh = |i: usize, j: usize| -> f64 {
+        let k = j * lnx + i;
+        let q = u16::from_le_bytes(h16[k * 2..k * 2 + 2].try_into().unwrap()) as f64;
+        lj["h_min"].as_f64().unwrap()
+            + (lj["h_max"].as_f64().unwrap() - lj["h_min"].as_f64().unwrap()) * q / 65535.0
+    };
+    for c in m["chunks"].as_array().unwrap() {
+        let Some(f) = c["water"]["file"].as_str() else {
+            continue;
+        };
+        let glb = std::fs::read(d.join(format!("exports/terrain/{f}"))).unwrap();
+        let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+        let attrs = &j["meshes"][0]["primitives"][0]["attributes"];
+        let ci = attrs["COLOR_0"].as_u64().unwrap() as usize;
+        let colors = glb_attr_f32(&glb, ci, 4);
+        let pos = glb_vertices(&glb);
+        // Boundary verts: touch an edge used by exactly one triangle —
+        // the mesh rim where the water sheet ends against terrain.
+        let idxs = {
+            let acc = &j["accessors"]
+                [j["meshes"][0]["primitives"][0]["indices"].as_u64().unwrap() as usize];
+            let bv = acc["bufferView"].as_u64().unwrap() as usize;
+            let off = j["bufferViews"][bv]["byteOffset"].as_u64().unwrap_or(0) as usize;
+            let cnt = acc["count"].as_u64().unwrap() as usize;
+            let bs = 20 + jl + ((4 - jl % 4) % 4) + 8;
+            (0..cnt)
+                .map(|i| {
+                    u32::from_le_bytes(
+                        glb[bs + off + i * 4..bs + off + i * 4 + 4]
+                            .try_into()
+                            .unwrap(),
+                    )
+                })
+                .collect::<Vec<u32>>()
+        };
+        let mut edge_use = std::collections::BTreeMap::<(u32, u32), u32>::new();
+        for t in idxs.chunks(3) {
+            for e in [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]] {
+                let key = (e[0].min(e[1]), e[0].max(e[1]));
+                *edge_use.entry(key).or_default() += 1;
+            }
+        }
+        let mut boundary = std::collections::BTreeSet::new();
+        for (&(a, b), &cnt) in &edge_use {
+            if cnt == 1 {
+                boundary.insert(a);
+                boundary.insert(b);
+            }
+        }
+        let origin = c["origin"].as_array().unwrap();
+        let (ox, oz) = (origin[0].as_f64().unwrap(), origin[2].as_f64().unwrap());
+        for (k, col) in colors.iter().enumerate() {
+            if col[1] != 0.5 || !boundary.contains(&(k as u32)) {
+                continue;
+            }
+            let (i, j) = (
+                ((ox + pos[k][0] as f64 - lx0) / cell).round() as usize,
+                ((oz + pos[k][2] as f64 - lz0) / cell).round() as usize,
+            );
+            let world_edge = i == 0 || j == 0 || i == lnx - 1 || j == lnz - 1;
+            if !world_edge {
+                // Rim verts are either at the borrowed lake level
+                // (covered bowl side) or clamped flush to terrain
+                // (outer ring / pour side) — never a half-float.
+                let y = pos[k][1] as f64;
+                let h = hh(i, j);
+                let on_level = m["lakes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|l| (y - l["level"].as_f64().unwrap()).abs() < 0.01);
+                assert!(
+                    (y - h).abs() < 0.5 || on_level,
+                    "lake boundary vert half-floats: y={y} h={h}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn gen3_water_invariants() {
     let d = gen3_dir("wi");
@@ -1441,9 +1700,27 @@ fn gen3_water_invariants() {
             &std::fs::read(d.join(format!("exports/terrain/chunk_{cx}_{cz}.glb"))).unwrap(),
         );
         // For each water vertex find the terrain vertex with the nearest
-        // x/z. Wet verts (river/lake node) sit on/above the bed; dry rim
-        // verts are clamped to terrain or a borrowed level, so y <= max.
-        for w in &wv {
+        // x/z. Wet verts (river/lake node) sit on/above the bed; river
+        // dry-rim verts are clamped to terrain, so y <= max. Lake rim
+        // verts stay at lake level by design (extra ring tucks under
+        // the bank), so kind-0.5 verts skip the clamp check.
+        let wglb = std::fs::read(d.join(format!(
+            "exports/terrain/{}",
+            c["water"]["file"].as_str().unwrap()
+        )))
+        .unwrap();
+        let wcol = {
+            let jl = u32::from_le_bytes(wglb[12..16].try_into().unwrap()) as usize;
+            let j: serde_json::Value = serde_json::from_slice(&wglb[20..20 + jl]).unwrap();
+            glb_attr_f32(
+                &wglb,
+                j["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"]
+                    .as_u64()
+                    .unwrap() as usize,
+                4,
+            )
+        };
+        for (wi, w) in wv.iter().enumerate() {
             let nearest = tv
                 .iter()
                 .min_by(|a, b| {
@@ -1456,13 +1733,18 @@ fn gen3_water_invariants() {
                 ((origin[0].as_f64().unwrap() + w[0] as f64 - lx0) / cell).round() as usize,
                 ((origin[2].as_f64().unwrap() + w[2] as f64 - lz0) / cell).round() as usize,
             );
-            let wet = river[j * lnx + i] == 1 || lake[j * lnx + i] == 1;
-            if wet {
+            // Sea verts sit exactly at sea level over submerged terrain —
+            // neither the wet-bed nor dry-rim rule applies to them.
+            let is_sea = (w[1] - m["sea_level_m"].as_f64().unwrap() as f32).abs() < 1e-4;
+            if is_sea {
+                // flat at sea level by construction
+            } else if river[j * lnx + i] == 1 || lake[j * lnx + i] == 1 {
                 assert!(
                     w[1] >= nearest[1] - 1e-4,
                     "wet water vertex below bed: w={w:?} t={nearest:?}"
                 );
-            } else {
+            } else if wcol[wi][1] != 0.5 {
+                // river rim (kind 0/1 non-sea): clamped to terrain.
                 assert!(
                     w[1] <= nearest[1] + 1e-4,
                     "dry rim vertex floats above terrain: w={w:?} t={nearest:?}"

@@ -44,7 +44,11 @@ fn accessors(mesh: &ChunkMesh) -> serde_json::Value {
           "type": "VEC3", "min": pmin, "max": pmax }),
         serde_json::json!({ "bufferView": 1, "componentType": 5126, "count": mesh.normals.len(), "type": "VEC3" }),
         serde_json::json!({ "bufferView": 2, "componentType": 5126, "count": mesh.uvs.len(), "type": "VEC2" }),
-        serde_json::json!({ "bufferView": 3, "componentType": 5126, "count": mesh.colors.len(), "type": "VEC3" }),
+        if mesh.colors4.is_empty() {
+            serde_json::json!({ "bufferView": 3, "componentType": 5126, "count": mesh.colors.len(), "type": "VEC3" })
+        } else {
+            serde_json::json!({ "bufferView": 3, "componentType": 5126, "count": mesh.colors4.len(), "type": "VEC4" })
+        },
     ];
     if !mesh.uv2.is_empty() {
         out.push(serde_json::json!({ "bufferView": 4, "componentType": 5126, "count": mesh.uv2.len(), "type": "VEC2" }));
@@ -127,10 +131,18 @@ fn glb_impl(
         push_f32(&mut bin, t[1]);
     }
     let col_off = bin.len();
-    for c in &mesh.colors {
-        push_f32(&mut bin, c[0]);
-        push_f32(&mut bin, c[1]);
-        push_f32(&mut bin, c[2]);
+    if mesh.colors4.is_empty() {
+        for c in &mesh.colors {
+            push_f32(&mut bin, c[0]);
+            push_f32(&mut bin, c[1]);
+            push_f32(&mut bin, c[2]);
+        }
+    } else {
+        for c in &mesh.colors4 {
+            for v in c {
+                push_f32(&mut bin, *v);
+            }
+        }
     }
     let uv2_off = bin.len();
     for t in &mesh.uv2 {
@@ -181,7 +193,11 @@ fn glb_impl(
             (pos_off, mesh.positions.len() * 12),
             (nrm_off, mesh.normals.len() * 12),
             (uv_off, mesh.uvs.len() * 8),
-            (col_off, mesh.colors.len() * 12),
+            (col_off, if mesh.colors4.is_empty() {
+                mesh.colors.len() * 12
+            } else {
+                mesh.colors4.len() * 16
+            }),
             (uv2_off, mesh.uv2.len() * 8),
             (idx_off, mesh.indices.len() * 4),
         ], mesh.uv2.is_empty()),

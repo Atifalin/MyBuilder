@@ -520,6 +520,7 @@ pub fn splat_weights(
     h: f64,
     g: f64,
     coast: f64,
+    river_sand: f64,
     sea: f64,
     snow_line: f64,
     t: &mb_schema::TexturingSection,
@@ -533,7 +534,10 @@ pub fn splat_weights(
         snow_line + t.snow_band_m,
         h - sea,
     ) * (1.0 - smoothstep(t.snow_max_slope - 0.1, t.snow_max_slope + 0.1, g));
-    let sand_raw = (1.0 - smoothstep(0.0, t.sand_width_m, water_dist(coast)))
+    // Rivers get a narrow 3 m band past their half-width (they are a few
+    // meters wide, not the coast-scale band); lakes/coast keep water_dist.
+    let river_band = 1.0 - smoothstep(0.0, 3.0, river_sand);
+    let sand_raw = (1.0 - smoothstep(0.0, t.sand_width_m, water_dist(coast))).max(river_band)
         * (1.0 - smoothstep(t.sand_max_height_m * 0.5, t.sand_max_height_m, h - sea));
     // rock priority, then snow, then sand; grass gets the rest.
     let r = 1.0 - rock;

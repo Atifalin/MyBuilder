@@ -185,6 +185,22 @@ func _finish_bench() -> void:
 		DirAccess.make_dir_recursive_absolute(top.get_base_dir())
 		img2.save_png(top)
 		print("saved ", top)
+	# Extra posed captures: MB_FLY_POSES="png|px,py,pz|tx,ty,tz;png|..."
+	var poses := OS.get_environment("MB_FLY_POSES")
+	if poses != "":
+		for spec in poses.split(";", false):
+			var parts := spec.split("|")
+			if parts.size() != 3:
+				continue
+			var pv := parts[1].split_floats(",")
+			var tv := parts[2].split_floats(",")
+			cam.position = Vector3(pv[0], pv[1], pv[2])
+			cam.look_at(Vector3(tv[0], tv[1], tv[2]), Vector3.UP)
+			await RenderingServer.frame_post_draw
+			var im := get_viewport().get_texture().get_image()
+			DirAccess.make_dir_recursive_absolute(parts[0].get_base_dir())
+			im.save_png(parts[0])
+			print("saved ", parts[0])
 	_bench_report()
 
 func _avg(a: Array) -> float:

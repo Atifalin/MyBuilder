@@ -11,6 +11,9 @@ pub struct ChunkMesh {
     pub uvs: Vec<[f32; 2]>,
     /// Linear RGB, f32 VEC3.
     pub colors: Vec<[f32; 3]>,
+    /// RGBA f32 VEC4 — used only by the gen-3 water mesh (depth01,
+    /// kind, 0, 1); empty for terrain meshes.
+    pub colors4: Vec<[f32; 4]>,
     /// Splat UVs for TEXCOORD_1 (gen 2 only; empty on gen 1).
     pub uv2: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
@@ -176,6 +179,7 @@ pub fn chunk_mesh_view(
         colors: Vec::with_capacity(vside * vside),
         indices: Vec::with_capacity(per * per * 6),
         uv2: Vec::new(),
+        colors4: Vec::new(),
         origin: [ox, 0.0, oz],
         vertex_count: vside * vside,
         triangle_count: per * per * 2,
@@ -197,7 +201,15 @@ pub fn chunk_mesh_view(
             if let Some((tex, n_texels)) = tex2 {
                 // gen 2: weight-blended palette + texel-center splat UVs
                 let g = node_slope(&h_at, gi, gj, grid.nx - 1, grid.nz - 1, grid.cell);
-                let w = crate::splat_weights(h, g, coast_at(gi, gj), sea_level_m, snow_line_m, tex);
+                let w = crate::splat_weights(
+                    h,
+                    g,
+                    coast_at(gi, gj),
+                    f64::MAX,
+                    sea_level_m,
+                    snow_line_m,
+                    tex,
+                );
                 let pal = [GRASS, SAND, ROCK, SNOW];
                 let mut c = [0.0f32; 3];
                 for k in 0..4 {

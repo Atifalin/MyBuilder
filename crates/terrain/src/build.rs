@@ -120,6 +120,49 @@ pub fn may_delete(dir: &Path, rel: &str) -> bool {
         && safe_to_delete(dir, rel)
 }
 
+/// Gen-3 sea ring: a flat water ring at sea level from the world edge
+/// out to 4x the half-extent (kind sea, depth01 = 1, no flow).
+pub fn sea_ring_file(grid: &crate::Grid, sea: f64) -> (String, Vec<u8>) {
+    let hw = grid.cell * (grid.nx - 1) as f64 / 2.0;
+    let hd = grid.cell * (grid.nz - 1) as f64 / 2.0;
+    let (iw, ih) = (hw, hd);
+    let (ow, oh) = (4.0 * hw, 4.0 * hd);
+    let inner = [[-iw, -ih], [iw, -ih], [iw, ih], [-iw, ih]];
+    let outer = [[-ow, -oh], [ow, -oh], [ow, oh], [-ow, oh]];
+    let mut wm = crate::mesh::ChunkMesh {
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        colors: Vec::new(),
+        colors4: Vec::new(),
+        uv2: Vec::new(),
+        indices: Vec::new(),
+        origin: [0.0, 0.0, 0.0],
+        vertex_count: 0,
+        triangle_count: 0,
+    };
+    // 4 trapezoid quads (2 tris each) joining inner edge to outer edge.
+    for s in 0..4 {
+        let s1 = (s + 1) % 4;
+        let base = wm.positions.len() as u32;
+        for p in [inner[s], inner[s1], outer[s1], outer[s]] {
+            wm.positions.push([p[0] as f32, sea as f32, p[1] as f32]);
+            wm.normals.push([0.0, 1.0, 0.0]);
+            wm.uvs.push([p[0] as f32, p[1] as f32]);
+            wm.uv2.push([0.0, 0.0]);
+            wm.colors4.push([1.0, 0.0, 0.0, 1.0]); // depth01=1, kind sea
+        }
+        wm.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    wm.vertex_count = wm.positions.len();
+    wm.triangle_count = wm.indices.len() / 3;
+    (
+        "exports/terrain/water/sea_ring.glb".to_string(),
+        crate::glb::water_glb(&wm, "sea_ring", "sea", 0, 0),
+    )
+}
+
 fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
     let mut out = vec![
         ("exports/terrain/manifest.json".to_string(), true),
@@ -143,6 +186,9 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                     push(format!("exports/terrain/{f}"), f);
                 }
             }
+        }
+        if let Some(f) = v["sea"]["file"].as_str() {
+            push(format!("exports/terrain/{f}"), f);
         }
         if let Some(regs) = v["regions"].as_array() {
             for r in regs {
@@ -296,6 +342,7 @@ fn collect_outputs(
     run_artifacts: &dyn Fn(&str) -> Option<Artifact>,
     grid: &crate::Grid,
     world: &WorldRecipe,
+    gen3: bool,
 ) -> FileBundle {
     let mut files = Vec::new();
     let layers = FileBundle::decode(&run_artifacts(LayersStage::ID).unwrap().bytes);
@@ -337,6 +384,9 @@ fn collect_outputs(
                 }
             }
         }
+    }
+    if gen3 {
+        files.push(sea_ring_file(grid, world.sea_level_m));
     }
     for r in &world.detail_regions {
         for cz in r.chunk_min[1]..=r.chunk_max[1] {
@@ -528,7 +578,7 @@ pub fn build_project_observed(
     )));
     if project.generator_version >= 3 {
         pipe.add(Box::new(crate::stages::HydrologyStage::new(
-            1,
+            4, // lake_cover depression-membership criterion
             grid,
             project.clone(),
             world.clone(),
@@ -551,7 +601,7 @@ pub fn build_project_observed(
                 world.clone(),
                 cx,
                 cz,
-                2, // any-wet water triangles + dry-vert clamping
+                6, // lake_cover criterion + ring clamp
             )));
         }
     }
@@ -610,7 +660,7 @@ pub fn build_project_observed(
         }
     }
     let lookup = |id: &str| owned.iter().find(|(k, _)| k == id).map(|(_, a)| a.clone());
-    let outputs = collect_outputs(&lookup, &grid, &world);
+    let outputs = collect_outputs(&lookup, &grid, &world, project.generator_version >= 3);
     let write = write_outputs(dir, &outputs)?;
     Ok(BuildReport {
         diagnostics: info,

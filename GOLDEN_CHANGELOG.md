@@ -65,3 +65,8 @@ that never reached a commit.
 | 2026-10-25 | 3 | terrain/gen3_river_mask | 3f671407a8f7 | 2a09a8cbd7fbdf8eb315e3242acb2f0391c32b327b830eca3dd517dd5115d5f9 | skip empty water meshes |
 | 2026-10-25 | 3 | terrain/gen3_manifest | 0d48591e72d1 | 5171ce9300040ddf15d655c3482d21f38f1328d4b7ff78bf23d1f9df9648126c | skip empty water meshes |
 | 2026-10-25 | 3 | terrain/gen3_manifest | 5171ce930004 | 67e50cb096b8f05d062a61573d44426c1def937417a3d4fe137b7953757d57b2 | gen-3 water mesh: any-wet triangles, dry rim verts clamped to terrain |
+| 2026-10-25 | 3 | terrain/gen3_manifest | 67e50cb096b8 | 21040784a2ea8a8007eb65f4018dc260cff79280f3c9fb4fa02fe752d2698eb3 | gen-3 water polish: sea quads+ring, kind/flow/RGBA attrs |
+| 2026-10-25 | 3 | terrain/gen3_manifest | 21040784a2ea | 47acb20fad77fa86301086409d3d89c0b2856a561bf1290f17853b191631198e | gen-3 water: lake rim at level + extra ring, sea quads, depth alpha |
+| 2026-10-25 | 3 | terrain/gen3_height_r16 | 2c2ee166e8e8 | 76916343d72f8b391371765c6a32e2af617739ab9d4c70b581dd15d37f1563b2 | gen-3 water: lake coverage flood-fill, river sand band, min half-width |
+| 2026-10-25 | 3 | terrain/gen3_manifest | 47acb20fad77 | 553ea9b0e0bd36238181450945ed6d745b854be779f8f279f8ee5d91eb50cf7b | gen-3 water: lake coverage flood-fill, river sand band, min half-width |
+| 2026-10-25 | 3 | schema/canonical_world | 5e3e505d17fc | 5602aa904d687bd8e173d4586931113187b378fe658b78882946e7acee8b6c2c | schema: hydrology gains river_min_half_width_m (default 2.0) — recipe canonical hash changes; generated output for gen 1/2 unchanged |

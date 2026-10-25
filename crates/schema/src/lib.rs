@@ -91,6 +91,9 @@ pub struct WorldScale {
 pub struct RecipePaths {
     /// Path of the world recipe, relative to the project dir.
     pub world: String,
+    /// Optional path of the houses recipe, relative to the project dir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub houses: Option<String>,
 }
 
 impl Default for ProjectFile {
@@ -122,6 +125,7 @@ impl Default for RecipePaths {
     fn default() -> Self {
         RecipePaths {
             world: "recipes/world.json".to_string(),
+            houses: None,
         }
     }
 }
@@ -1318,4 +1322,242 @@ pub fn load_project(
         serde_json::from_value(read_versioned(&dir.join(&project.recipes.world))?)?;
     let diags = validate_project(&project, &world);
     Ok((project, world, diags))
+}
+
+// ---------------------------------------------------------------------
+// recipes/houses.json (Phase 3)
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HouseRecipe {
+    pub schema_version: u32,
+    /// House-generator version (independent of the terrain one).
+    #[serde(default = "one")]
+    pub generator_version: u32,
+    #[serde(default)]
+    pub houses: Vec<HouseSpec>,
+}
+fn one() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HouseSpec {
+    pub id: String,
+    pub footprint: Footprint,
+    pub floors: u32,
+    #[serde(default = "def_floor_h")]
+    pub floor_height_m: f64,
+    #[serde(default = "def_wall_t")]
+    pub wall_thickness_m: f64,
+    #[serde(default = "def_plinth")]
+    pub plinth_m: f64,
+    #[serde(default)]
+    pub front: Side,
+    #[serde(default)]
+    pub roof: Roof,
+    #[serde(default = "one_u8")]
+    pub complexity: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
+}
+fn def_floor_h() -> f64 {
+    3.2
+}
+fn def_wall_t() -> f64 {
+    0.35
+}
+fn def_plinth() -> f64 {
+    0.45
+}
+fn one_u8() -> u8 {
+    1
+}
+
+/// Footprint shapes; all corners are right angles.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Footprint {
+    Rect {
+        w: f64,
+        d: f64,
+    },
+    L {
+        w: f64,
+        d: f64,
+        cut_w: f64,
+        cut_d: f64,
+    },
+    Courtyard {
+        w: f64,
+        d: f64,
+        court_w: f64,
+        court_d: f64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    #[default]
+    S,
+    N,
+    E,
+    W,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Roof {
+    Flat {
+        #[serde(default = "def_parapet")]
+        parapet_m: f64,
+    },
+}
+fn def_parapet() -> f64 {
+    0.9
+}
+impl Default for Roof {
+    fn default() -> Self {
+        Roof::Flat { parapet_m: 0.9 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    pub x: f64,
+    pub z: f64,
+    /// Quarter turns around Y (0,1,2,3).
+    pub rot_quarter: u8,
+}
+
+/// Read houses.json when project.recipes.houses is set.
+pub fn load_houses(dir: &Path, project: &ProjectFile) -> Result<Option<HouseRecipe>, SchemaError> {
+    let Some(rel) = &project.recipes.houses else {
+        return Ok(None);
+    };
+    if recipe_path_is_invalid(rel) {
+        return Err(SchemaError::InvalidRecipePath(rel.clone()));
+    }
+    let r: HouseRecipe = serde_json::from_value(read_versioned(&dir.join(rel))?)?;
+    Ok(Some(r))
+}
+
+pub fn validate_houses(recipe: &HouseRecipe) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for (i, h) in recipe.houses.iter().enumerate() {
+        let path = format!("/houses/{i}");
+        let ent = |mut d: Diagnostic| {
+            d.entity_id = Some(h.id.clone());
+            d
+        };
+        if h.id.is_empty()
+            || h.id.len() > 40
+            || !h
+                .id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        {
+            out.push(ent(Diagnostic::error(
+                "house.id.invalid",
+                format!("{path}/id"),
+                format!("id {:?} must match [a-z0-9_-]{{1,40}}", h.id),
+            )));
+        }
+        if seen.contains(&h.id.as_str()) {
+            out.push(ent(Diagnostic::error(
+                "house.id.duplicate",
+                format!("{path}/id"),
+                format!("duplicate house id {:?}", h.id),
+            )));
+        }
+        seen.push(&h.id);
+        let fin = |v: f64| v.is_finite();
+        let (w, d) = match &h.footprint {
+            Footprint::Rect { w, d } => (*w, *d),
+            Footprint::L { w, d, .. } => (*w, *d),
+            Footprint::Courtyard { w, d, .. } => (*w, *d),
+        };
+        if !(fin(w) && fin(d) && w >= 6.0 && d >= 6.0) {
+            out.push(ent(Diagnostic::error(
+                "house.footprint.too_small",
+                format!("{path}/footprint"),
+                format!("outer footprint must be >= 6x6 m, got {w}x{d}"),
+            )));
+        }
+        match &h.footprint {
+            Footprint::Rect { .. } => {}
+            Footprint::L { cut_w, cut_d, .. } => {
+                if !fin(*cut_w) || !fin(*cut_d) || *cut_w > w - 4.0 || *cut_d > d - 4.0 {
+                    out.push(ent(Diagnostic::error(
+                        "house.footprint.cut_too_big",
+                        format!("{path}/footprint"),
+                        "L cut must leave >= 4 m arms on both sides".to_string(),
+                    )));
+                }
+            }
+            Footprint::Courtyard {
+                court_w, court_d, ..
+            } => {
+                let ok = fin(*court_w)
+                    && fin(*court_d)
+                    && *court_w >= 3.0
+                    && *court_d >= 3.0
+                    && (w - court_w) / 2.0 >= 4.0
+                    && (d - court_d) / 2.0 >= 4.0;
+                if !ok {
+                    out.push(ent(Diagnostic::error(
+                        "house.footprint.court_invalid",
+                        format!("{path}/footprint"),
+                        "courtyard must be >= 3x3 m with >= 4 m rooms on every side".to_string(),
+                    )));
+                }
+            }
+        }
+        if !(1..=4).contains(&h.floors) {
+            out.push(ent(Diagnostic::error(
+                "house.floors.range",
+                format!("{path}/floors"),
+                format!("floors must be 1..=4, got {}", h.floors),
+            )));
+        }
+        if h.complexity > 2 {
+            out.push(ent(Diagnostic::error(
+                "house.complexity.range",
+                format!("{path}/complexity"),
+                format!("complexity must be 0..=2, got {}", h.complexity),
+            )));
+        }
+        if !(fin(h.wall_thickness_m) && (0.2..=0.8).contains(&h.wall_thickness_m)) {
+            out.push(ent(Diagnostic::error(
+                "house.wall_thickness.range",
+                format!("{path}/wall_thickness_m"),
+                format!(
+                    "wall thickness must be 0.2..=0.8 m, got {}",
+                    h.wall_thickness_m
+                ),
+            )));
+        }
+        if !fin(h.floor_height_m) || !fin(h.plinth_m) {
+            out.push(ent(Diagnostic::error(
+                "house.dimension.non_finite",
+                path.clone(),
+                "floor_height_m and plinth_m must be finite".to_string(),
+            )));
+        }
+        if let Some(p) = &h.placement
+            && (!fin(p.x) || !fin(p.z) || p.rot_quarter > 3)
+        {
+            out.push(ent(Diagnostic::error(
+                "house.placement.invalid",
+                format!("{path}/placement"),
+                "placement x/z must be finite and rot_quarter 0..=3".to_string(),
+            )));
+        }
+    }
+    out
 }

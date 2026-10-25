@@ -320,3 +320,218 @@ pub fn chaikin(points: &[[f64; 2]], iterations: u32, closed: bool) -> Vec<[f64; 
     }
     pts
 }
+
+// ---------------------------------------------------------------------
+// Polygon-with-holes triangulation (integer mm coords, exact predicates)
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TriError {
+    Degenerate,
+    NotSimple,
+}
+
+fn area2(poly: &[[i64; 2]]) -> i128 {
+    let n = poly.len();
+    let mut a: i128 = 0;
+    for i in 0..n {
+        let (x1, y1) = (poly[i][0] as i128, poly[i][1] as i128);
+        let (x2, y2) = (poly[(i + 1) % n][0] as i128, poly[(i + 1) % n][1] as i128);
+        a += x1 * y2 - x2 * y1;
+    }
+    a
+}
+
+fn orient(a: [i64; 2], b: [i64; 2], c: [i64; 2]) -> i128 {
+    ((b[0] - a[0]) as i128) * ((c[1] - a[1]) as i128)
+        - ((b[1] - a[1]) as i128) * ((c[0] - a[0]) as i128)
+}
+
+fn on_seg(a: [i64; 2], b: [i64; 2], p: [i64; 2]) -> bool {
+    orient(a, b, p) == 0
+        && p[0].min(a[0]).max(b[0]) == p[0].min(a[0]).max(b[0])
+        && p[0] >= a[0].min(b[0])
+        && p[0] <= a[0].max(b[0])
+        && p[1] >= a[1].min(b[1])
+        && p[1] <= a[1].max(b[1])
+}
+
+fn segs_cross(a: [i64; 2], b: [i64; 2], c: [i64; 2], d: [i64; 2]) -> bool {
+    let o1 = orient(a, b, c);
+    let o2 = orient(a, b, d);
+    let o3 = orient(c, d, a);
+    let o4 = orient(c, d, b);
+    if o1 == 0 && on_seg(a, b, c) {
+        return true;
+    }
+    if o2 == 0 && on_seg(a, b, d) {
+        return true;
+    }
+    if o3 == 0 && on_seg(c, d, a) {
+        return true;
+    }
+    if o4 == 0 && on_seg(c, d, b) {
+        return true;
+    }
+    (o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0)
+}
+
+/// A ring of (point, concat index) pairs.
+type Ring = Vec<([i64; 2], u32)>;
+
+/// Is `b` strictly inside the interior angle of the ring at `cur`
+/// (ring neighbours `prev`, `next`, ring CCW)? O'Rourke's InCone; it
+/// tells duplicated bridge vertices apart by their ring neighbours.
+fn in_cone(prev: [i64; 2], cur: [i64; 2], next: [i64; 2], b: [i64; 2]) -> bool {
+    if orient(prev, cur, next) >= 0 {
+        orient(cur, b, prev) > 0 && orient(b, cur, next) > 0
+    } else {
+        !(orient(cur, b, next) >= 0 && orient(b, cur, prev) >= 0)
+    }
+}
+
+/// Ear-clipping triangulation of a simple polygon with holes, on integer
+/// coordinates with exact i128 predicates. Indices refer to the
+/// concatenation `outer ++ holes[0] ++ holes[1] ++ ...`.
+/// Deterministic: holes are bridged in descending max-x order (ties by
+/// hole index) to the nearest visible ring vertex (ties by ring
+/// position); ears are always the first valid one in ring order.
+pub fn triangulate_with_holes(
+    outer: &[[i64; 2]],
+    holes: &[Vec<[i64; 2]>],
+) -> Result<Vec<[u32; 3]>, TriError> {
+    if outer.len() < 3 || area2(outer) == 0 {
+        return Err(TriError::Degenerate);
+    }
+    // Ring of (point, concat index); outer CCW.
+    let mut ring: Ring = outer
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (p, i as u32))
+        .collect();
+    if area2(outer) < 0 {
+        ring.reverse();
+    }
+    // Holes CW, each tagged with its concat base offset.
+    let mut base = outer.len() as u32;
+    let mut hs: Vec<(usize, Ring)> = Vec::new();
+    for (k, h) in holes.iter().enumerate() {
+        if h.len() < 3 || area2(h) == 0 {
+            return Err(TriError::Degenerate);
+        }
+        let mut v: Vec<([i64; 2], u32)> = h
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, base + i as u32))
+            .collect();
+        if area2(h) > 0 {
+            v.reverse();
+        }
+        base += h.len() as u32;
+        hs.push((k, v));
+    }
+    let all_hole_edges: Vec<([i64; 2], [i64; 2])> = hs
+        .iter()
+        .flat_map(|(_, v)| (0..v.len()).map(move |i| (v[i].0, v[(i + 1) % v.len()].0)))
+        .collect();
+    let maxx = |v: &Ring| v.iter().map(|p| p.0[0]).max().unwrap();
+    hs.sort_by(|a, b| maxx(&b.1).cmp(&maxx(&a.1)).then(a.0.cmp(&b.0)));
+    for (_, hole) in &hs {
+        // Hole vertex with max x (ties: min y, then first in ring).
+        let hi = (0..hole.len())
+            .min_by_key(|&i| (-hole[i].0[0], hole[i].0[1], i))
+            .unwrap();
+        let hv = hole[hi].0;
+        let n = ring.len();
+        let mut best: Option<(i128, usize)> = None;
+        for i in 0..n {
+            let cand = ring[i].0;
+            if cand == hv {
+                continue;
+            }
+            let (prev, next) = (ring[(i + n - 1) % n].0, ring[(i + 1) % n].0);
+            if !in_cone(prev, cand, next, hv) {
+                continue;
+            }
+            let blocked = (0..n)
+                .map(|e| (ring[e].0, ring[(e + 1) % n].0))
+                .chain(all_hole_edges.iter().copied())
+                .any(|(a, b)| {
+                    a != cand && b != cand && a != hv && b != hv && segs_cross(cand, hv, a, b)
+                });
+            if blocked {
+                continue;
+            }
+            let (dx, dy) = ((cand[0] - hv[0]) as i128, (cand[1] - hv[1]) as i128);
+            let d = dx * dx + dy * dy;
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, i));
+            }
+        }
+        let Some((_, bi)) = best else {
+            return Err(TriError::NotSimple);
+        };
+        // Splice: ring[..=bi], hole from hv all the way round back to hv,
+        // then ring[bi] again and the rest.
+        let mut spliced = Vec::with_capacity(n + hole.len() + 2);
+        spliced.extend_from_slice(&ring[..=bi]);
+        for k in 0..=hole.len() {
+            spliced.push(hole[(hi + k) % hole.len()]);
+        }
+        spliced.push(ring[bi]);
+        spliced.extend_from_slice(&ring[bi + 1..]);
+        ring = spliced;
+    }
+    // Ear clipping.
+    let mut tris = Vec::new();
+    while ring.len() > 3 {
+        let m = ring.len();
+        let p = |i: usize| ring[i % m].0;
+        let mut ear = None;
+        for i in 0..m {
+            let (ia, ic) = ((i + m - 1) % m, (i + 1) % m);
+            let (a, b, c) = (p(ia), p(i), p(ic));
+            if orient(a, b, c) <= 0 {
+                continue;
+            }
+            // Diagonal a-c must leave a and c into the interior...
+            if !in_cone(p(ia + m - 1), a, b, c) || !in_cone(b, c, p(ic + 1), a) {
+                continue;
+            }
+            // ...cross no ring edge, and no other vertex may touch the ear.
+            let bad = (0..m).any(|e| {
+                let (u, v) = (p(e), p(e + 1));
+                let edge_hit = u != a && u != c && v != a && v != c && segs_cross(a, c, u, v);
+                let q = p(e);
+                let pt_hit = q != a
+                    && q != b
+                    && q != c
+                    && orient(a, b, q) >= 0
+                    && orient(b, c, q) >= 0
+                    && orient(c, a, q) >= 0;
+                edge_hit || pt_hit
+            });
+            if !bad {
+                ear = Some(i);
+                break;
+            }
+        }
+        let i = match ear {
+            Some(i) => i,
+            // Only zero-area (collinear) corners left to remove.
+            None => match (0..m).find(|&i| orient(p(i + m - 1), p(i), p(i + 1)) == 0) {
+                Some(i) => {
+                    ring.remove(i);
+                    continue;
+                }
+                None => return Err(TriError::NotSimple),
+            },
+        };
+        tris.push([ring[(i + m - 1) % m].1, ring[i].1, ring[(i + 1) % m].1]);
+        ring.remove(i);
+    }
+    if orient(ring[0].0, ring[1].0, ring[2].0) > 0 {
+        tris.push([ring[0].1, ring[1].1, ring[2].1]);
+    }
+    Ok(tris)
+}

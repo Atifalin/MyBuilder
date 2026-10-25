@@ -39,6 +39,11 @@ enum Command {
         #[arg(long, value_parser = ["water-first", "land-first"])]
         start: Option<String>,
     },
+    /// Manage houses (Phase 3).
+    House {
+        #[command(subcommand)]
+        cmd: HouseCmd,
+    },
     /// Validate a project folder and print diagnostics.
     Validate {
         dir: PathBuf,
@@ -104,6 +109,38 @@ fn parse_seed(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid --seed {s:?}: expected hex, {e}"))
 }
 
+#[derive(Subcommand)]
+enum HouseCmd {
+    /// Add a house spec to recipes/houses.json.
+    Add {
+        dir: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long, value_parser = ["rect", "l", "courtyard"])]
+        footprint: Option<String>,
+        #[arg(long)]
+        w: Option<f64>,
+        #[arg(long)]
+        d: Option<f64>,
+        #[arg(long)]
+        cut_w: Option<f64>,
+        #[arg(long)]
+        cut_d: Option<f64>,
+        #[arg(long)]
+        court_w: Option<f64>,
+        #[arg(long)]
+        court_d: Option<f64>,
+        #[arg(long)]
+        floors: Option<u32>,
+        #[arg(long)]
+        complexity: Option<u8>,
+        #[arg(long, value_parser = ["s", "n", "e", "w"])]
+        front: Option<String>,
+    },
+    /// List houses in the project.
+    List { dir: PathBuf },
+}
+
 fn cmd_new(
     dir: &Path,
     name: Option<String>,
@@ -165,6 +202,123 @@ fn print_diags(diags: &[mb_schema::Diagnostic]) {
 
 fn has_errors(diags: &[mb_schema::Diagnostic]) -> bool {
     diags.iter().any(|d| d.severity == Severity::Error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_house_add(
+    dir: &Path,
+    id: String,
+    footprint: &str,
+    w: f64,
+    d: f64,
+    cut_w: Option<f64>,
+    cut_d: Option<f64>,
+    court_w: Option<f64>,
+    court_d: Option<f64>,
+    floors: u32,
+    complexity: u8,
+    front: &str,
+) -> Result<ExitCode, String> {
+    use mb_schema::*;
+    let pj_path = dir.join("project.json");
+    let mut project: ProjectFile = serde_json::from_str(
+        &std::fs::read_to_string(&pj_path).map_err(|e| format!("read project.json: {e}"))?,
+    )
+    .map_err(|e| format!("project.json: {e}"))?;
+    let rel = project
+        .recipes
+        .houses
+        .clone()
+        .unwrap_or_else(|| "recipes/houses.json".to_string());
+    let hp = dir.join(&rel);
+    let mut recipe: HouseRecipe = if hp.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&hp).map_err(|e| format!("read {rel}: {e}"))?)
+            .map_err(|e| format!("{rel}: {e}"))?
+    } else {
+        HouseRecipe {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            generator_version: 1,
+            houses: Vec::new(),
+        }
+    };
+    let fp = match footprint {
+        "rect" => Footprint::Rect { w, d },
+        "l" => Footprint::L {
+            w,
+            d,
+            cut_w: cut_w.ok_or("--cut-w required for footprint l")?,
+            cut_d: cut_d.ok_or("--cut-d required for footprint l")?,
+        },
+        "courtyard" => Footprint::Courtyard {
+            w,
+            d,
+            court_w: court_w.ok_or("--court-w required for footprint courtyard")?,
+            court_d: court_d.ok_or("--court-d required for footprint courtyard")?,
+        },
+        _ => unreachable!(),
+    };
+    let side = match front {
+        "n" => Side::N,
+        "e" => Side::E,
+        "w" => Side::W,
+        _ => Side::S,
+    };
+    recipe.houses.push(HouseSpec {
+        id,
+        footprint: fp,
+        floors,
+        floor_height_m: 3.2,
+        wall_thickness_m: 0.35,
+        plinth_m: 0.45,
+        front: side,
+        roof: Roof::default(),
+        complexity,
+        placement: None,
+    });
+    let diags = validate_houses(&recipe);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    if !errors.is_empty() {
+        for d in errors {
+            eprintln!("error[{}] {}: {}", d.code, d.path, d.message);
+        }
+        return Err("house spec rejected; nothing written".to_string());
+    }
+    // Write recipe + project atomically-ish (write file then rename).
+    let mut text = serde_json::to_string_pretty(&recipe).map_err(|e| e.to_string())?;
+    text.push('\n');
+    let tmp = hp.with_extension("tmp");
+    std::fs::write(&tmp, &text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &hp).map_err(|e| e.to_string())?;
+    if project.recipes.houses.is_none() {
+        project.recipes.houses = Some(rel.clone());
+        let mut t = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
+        t.push('\n');
+        let tp = pj_path.with_extension("tmp");
+        std::fs::write(&tp, &t).map_err(|e| e.to_string())?;
+        std::fs::rename(&tp, &pj_path).map_err(|e| e.to_string())?;
+    }
+    println!("added house to {rel}");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_house_list(dir: &Path) -> Result<ExitCode, String> {
+    use mb_schema::*;
+    let project: ProjectFile = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("project.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    match load_houses(dir, &project).map_err(|e| e.to_string())? {
+        None => println!("(no houses)"),
+        Some(r) => {
+            for h in &r.houses {
+                println!("{}", h.id);
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_validate(dir: &Path, json: bool) -> Result<ExitCode, String> {
@@ -460,6 +614,36 @@ fn main() -> ExitCode {
             start,
         } => cmd_new(&dir, name, seed, size, feel, start).map(|_| ExitCode::SUCCESS),
         Command::Validate { dir, json } => cmd_validate(&dir, json),
+        Command::House { cmd } => match cmd {
+            HouseCmd::Add {
+                dir,
+                id,
+                footprint,
+                w,
+                d,
+                cut_w,
+                cut_d,
+                court_w,
+                court_d,
+                floors,
+                complexity,
+                front,
+            } => cmd_house_add(
+                &dir,
+                id,
+                footprint.as_deref().unwrap_or("rect"),
+                w.unwrap_or(10.0),
+                d.unwrap_or(8.0),
+                cut_w,
+                cut_d,
+                court_w,
+                court_d,
+                floors.unwrap_or(2),
+                complexity.unwrap_or(1),
+                front.as_deref().unwrap_or("s"),
+            ),
+            HouseCmd::List { dir } => cmd_house_list(&dir),
+        },
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),
         Command::Probe => Ok(cmd_probe()),

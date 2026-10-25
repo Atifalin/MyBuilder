@@ -221,6 +221,15 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                 }
             }
         }
+        if let Some(ps) = v["parts"].as_array() {
+            for h in ps {
+                for k in ["lod0", "lod1"] {
+                    if let Some(f) = h["files"][k].as_str() {
+                        push(format!("exports/houses/{f}"), f);
+                    }
+                }
+            }
+        }
     }
     if let Ok(t) = std::fs::read(dir.join("layers/layers.json"))
         && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&t)
@@ -435,7 +444,7 @@ fn collect_outputs(
     // Houses: each stage artifact is a FileBundle with lod*.glb +
     // summary.json; re-path them under exports/houses/<id>/.
     if !houses.is_empty() {
-        let mut summaries = Vec::new();
+        let mut summaries: Vec<serde_json::Value> = Vec::new();
         for h in houses {
             let a = run_artifacts(&crate::stages::HouseStage::stage_id(&h.id))
                 .unwrap_or_else(|| panic!("missing house stage {}", h.id));
@@ -450,7 +459,7 @@ fn collect_outputs(
         }
         summaries.sort_by_key(|v| v["id"].as_str().unwrap_or("").to_string());
         let mut entries = Vec::new();
-        for sm in summaries {
+        for sm in &summaries {
             let id = sm["id"].as_str().unwrap().to_string();
             entries.push(serde_json::json!({
                 "id": id,
@@ -468,10 +477,32 @@ fn collect_outputs(
                 "bounds": sm["bounds"],
             }));
         }
-        let hm = serde_json::json!({
+        // part GLBs + parts manifest section
+        let mut parts_entries: Vec<serde_json::Value> = Vec::new();
+        if let Some(a) = run_artifacts(crate::stages::HousePartsStage::ID) {
+            for (rel, bytes) in FileBundle::decode(&a.bytes).files {
+                if rel == "parts.json" {
+                    parts_entries =
+                        serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).unwrap();
+                } else {
+                    files.push((format!("exports/houses/{rel}"), bytes));
+                }
+            }
+        }
+        for e in entries.iter_mut() {
+            let id = e["id"].as_str().unwrap_or("").to_string();
+            let sm = summaries.iter().find(|v| v["id"] == id);
+            if let Some(sm) = sm {
+                e["instances"] = sm["instances"].clone();
+            }
+        }
+        let mut hm = serde_json::json!({
             "house_generator_version": mb_house::CURRENT_HOUSE_GENERATOR_VERSION,
             "houses": entries,
         });
+        if !parts_entries.is_empty() {
+            hm["parts"] = serde_json::json!(parts_entries);
+        }
         files.push((
             "exports/houses/manifest.json".to_string(),
             serde_json::to_vec_pretty(&hm).unwrap(),
@@ -700,6 +731,12 @@ pub fn build_project_observed(
     for h in &houses {
         pipe.add(Box::new(crate::stages::HouseStage::new(
             h.clone(),
+            project.seed,
+        )));
+    }
+    if !houses.is_empty() {
+        pipe.add(Box::new(crate::stages::HousePartsStage::new(
+            houses.clone(),
             project.seed,
         )));
     }

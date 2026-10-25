@@ -371,3 +371,58 @@ fn winding_matches_normals() {
     }
     assert!(bad.is_empty(), "triangles facing against their normals");
 }
+
+#[test]
+fn parts_budget_and_sharing() {
+    use mb_house::parts::build_part;
+    let mut keys = std::collections::BTreeSet::new();
+    let (mut n_inst, mut max0, mut max1) = (0usize, 0usize, 0usize);
+    for s in sweep() {
+        let h = generate(&s, house_seed(1, &s.id));
+        let (mut t0, mut t1) = (tris(&h.lods[0]), tris(&h.lods[1]));
+        let (lo, hi) = h.bounds;
+        for i in &h.instances {
+            keys.insert(i.key.clone());
+            n_inst += 1;
+            if i.lods & 1 != 0 {
+                t0 += tris(&build_part(i.kind, &i.params, false));
+            }
+            if i.lods & 2 != 0 {
+                t1 += tris(&build_part(i.kind, &i.params, true));
+            }
+            let o = [i.transform[9], i.transform[10], i.transform[11]];
+            for k in 0..3 {
+                assert!(
+                    o[k] >= lo[k] - 1.0 && o[k] <= hi[k] + 1.0,
+                    "{} {:?} origin {o:?} outside {:?}",
+                    s.id,
+                    i.kind,
+                    h.bounds
+                );
+            }
+        }
+        max0 = max0.max(t0);
+        max1 = max1.max(t1);
+        if t0 > 8000 {
+            let mut c = std::collections::BTreeMap::<String, (usize, usize)>::new();
+            for i in &h.instances {
+                let e = c.entry(format!("{:?}", i.kind)).or_insert((0, 0));
+                e.0 += 1;
+                e.1 += tris(&build_part(i.kind, &i.params, false));
+            }
+            println!(
+                "{} house {} parts {c:?} spec {:?}",
+                s.id,
+                tris(&h.lods[0]),
+                s
+            );
+        }
+        assert!(t0 <= 8000, "{} LOD0 with parts {t0}", s.id);
+        assert!(t1 <= 1500, "{} LOD1 with parts {t1}", s.id);
+    }
+    println!(
+        "parts: {} unique keys over {n_inst} instances; LOD0+parts max {max0}, LOD1+parts max {max1}",
+        keys.len()
+    );
+    assert!(keys.len() <= 20, "too many unique parts: {}", keys.len());
+}

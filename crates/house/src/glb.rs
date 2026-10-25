@@ -3,7 +3,7 @@
 
 use crate::{Lod, Mat, Prim};
 
-pub const MAT_NAMES: [&str; 5] = ["plaster", "stone", "roof", "floor", "opening"];
+pub const MAT_NAMES: [&str; 6] = ["plaster", "stone", "roof", "floor", "opening", "wood"];
 
 pub fn mat_rgb(m: Mat, plaster_rgb: [f32; 3]) -> [f32; 3] {
     match m {
@@ -12,6 +12,7 @@ pub fn mat_rgb(m: Mat, plaster_rgb: [f32; 3]) -> [f32; 3] {
         Mat::Roof => [0.70, 0.62, 0.52],
         Mat::Floor => [0.55, 0.45, 0.38],
         Mat::Opening => [0.12, 0.10, 0.09],
+        Mat::Wood => [0.36, 0.22, 0.12],
     }
 }
 

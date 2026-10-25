@@ -10,6 +10,13 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 		return out
 	var m: Dictionary = JSON.parse_string(f.get_as_text())
 	var base := manifest_path.get_base_dir()
+	var part_xf := {}
+	var row_x := 0.0
+	var row_total := -6.0
+	for h in m.get("houses", []):
+		if h.get("placement") == null:
+			row_total += float(h["bounds"]["max"][0]) - float(h["bounds"]["min"][0]) + 6.0
+	var ranges_all := [[0.0, 60.0], [60.0, 250.0]]
 	for h in m.get("houses", []):
 		var node := Node3D.new()
 		node.name = h["id"]
@@ -18,6 +25,12 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 		if pl != null:
 			node.position = Vector3(pl["x"], 0.0, pl["z"])
 			node.rotation.y = -PI / 2.0 * float(pl["rot_quarter"])
+		else:
+			# Unplaced houses: a row along +X centred on the origin, 6 m apart.
+			var bmin: Array = h["bounds"]["min"]
+			var bmax: Array = h["bounds"]["max"]
+			node.position.x = row_x - float(bmin[0]) - row_total / 2.0
+			row_x += float(bmax[0]) - float(bmin[0]) + 6.0
 		var files: Dictionary = h["files"]
 		var ranges := [[0.0, 60.0], [60.0, 250.0], [250.0, 0.0]]
 		for li in 3:
@@ -49,6 +62,50 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 		node.add_child(body)
 		parent.add_child(node)
 		out["houses"].append(node)
+		# Gather part instances (house transform x instance transform).
+		for inst in h.get("instances", []):
+			var t: Array = inst["transform"]
+			var local := Transform3D(
+				Basis(Vector3(t[0], t[1], t[2]), Vector3(t[3], t[4], t[5]), Vector3(t[6], t[7], t[8])),
+				Vector3(t[9], t[10], t[11]))
+			for li in 2:
+				if int(inst["lods"]) & (1 << li):
+					var k := "%s/%d" % [inst["key"], li]
+					if not part_xf.has(k):
+						part_xf[k] = []
+					part_xf[k].append(node.transform * local)
+	# One MultiMeshInstance3D per part key x LOD, shared by every house.
+	var parts_node := Node3D.new()
+	parts_node.name = "Parts"
+	parent.add_child(parts_node)
+	out["parts"] = parts_node
+	out["part_instances"] = {}
+	for pt in m.get("parts", []):
+		for li in 2:
+			var k := "%s/%d" % [pt["key"], li]
+			if not part_xf.has(k):
+				continue
+			var doc := GLTFDocument.new()
+			var st := GLTFState.new()
+			var path := base + "/../" + String(pt["files"]["lod%d" % li])
+			if doc.append_from_file(path, st) != OK:
+				printerr("house_loader: append %s failed" % path)
+				continue
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.mesh = _first_mesh(doc.generate_scene(st))
+			var xs: Array = part_xf[k]
+			mm.instance_count = xs.size()
+			for i in xs.size():
+				mm.set_instance_transform(i, xs[i])
+			var mmi := MultiMeshInstance3D.new()
+			mmi.name = "%s_lod%d" % [pt["key"], li]
+			mmi.multimesh = mm
+			mmi.visibility_range_begin = ranges_all[li][0]
+			mmi.visibility_range_end = ranges_all[li][1]
+			mmi.visibility_range_end_margin = 5.0
+			parts_node.add_child(mmi)
+			out["part_instances"][k] = xs.size()
 	return out
 
 static func _first_mesh(n: Node) -> Mesh:

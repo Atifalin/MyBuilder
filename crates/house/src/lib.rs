@@ -10,8 +10,9 @@
 use mb_schema::{Footprint, HouseSpec, Side};
 
 pub mod glb;
+pub mod parts;
 
-pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 1;
+pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 2;
 
 pub fn house_seed(project_seed: u64, id: &str) -> u64 {
     mb_seed::derive_path(project_seed, &[("house", id)])
@@ -25,14 +26,16 @@ pub enum Mat {
     Roof,
     Floor,
     Opening,
+    Wood,
 }
-pub(crate) const MATS_ORDER: [Mat; 5] = MATS;
-const MATS: [Mat; 5] = [
+pub(crate) const MATS_ORDER: [Mat; 6] = MATS;
+const MATS: [Mat; 6] = [
     Mat::Plaster,
     Mat::Stone,
     Mat::Roof,
     Mat::Floor,
     Mat::Opening,
+    Mat::Wood,
 ];
 
 #[derive(Default)]
@@ -68,6 +71,8 @@ pub struct BoxCollider {
     pub half: [f32; 3],
 }
 pub struct HouseMesh {
+    /// Instanced part placements (Phase 3 step 2).
+    pub instances: Vec<parts::PartInstance>,
     pub lods: [Lod; 3],
     pub colliders: Vec<BoxCollider>,
     pub plaster_rgb: [f32; 3],
@@ -94,28 +99,35 @@ const AC4: [f64; 5] = [1.0, 0.9532012, 0.8164966, 0.6030227, 0.3333333];
 const AS4: [f64; 5] = [0.0, 0.3023998, 0.5773503, 0.7977240, 0.9428090];
 
 const MM: f64 = 1000.0;
-fn mm(m: f64) -> i64 {
+pub(crate) fn mm(m: f64) -> i64 {
     mb_geom::snap(m)
 }
-fn m(mm_: i64) -> f32 {
+pub(crate) fn m(mm_: i64) -> f32 {
     mm_ as f32 / 1000.0
 }
 
 type P2 = [i64; 2];
 
-struct Bld {
-    prims: [Prim; 5],
+pub(crate) struct Bld {
+    prims: [Prim; MATS.len()],
 }
 impl Bld {
     fn new() -> Self {
-        let mut p: [Prim; 5] = Default::default();
+        let mut p: [Prim; MATS.len()] = Default::default();
         for (i, mt) in MATS.iter().enumerate() {
             p[i].mat = *mt;
         }
         Bld { prims: p }
     }
     /// Emit a polygon (convex, fan) with flat normal; uv given per vertex.
-    fn poly(&mut self, mat: Mat, pts: &[[f32; 3]], n: [f32; 3], uv: &[[f32; 2]], rev: bool) {
+    pub(crate) fn poly(
+        &mut self,
+        mat: Mat,
+        pts: &[[f32; 3]],
+        n: [f32; 3],
+        uv: &[[f32; 2]],
+        rev: bool,
+    ) {
         let pr = &mut self.prims[mat as usize];
         let base = pr.positions.len() as u32;
         pr.positions.extend_from_slice(pts);
@@ -1322,6 +1334,74 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
             }
         }
     }
+
+    // ---- part kit placement (step 2) ----
+    let mut rng2 = mb_seed::Rng::new(seed ^ 0x9e3779b97f4a7c15u64);
+    // The longest outer piece facing the front carries the door and the
+    // jharokhas (pieces are indexed like the outer polygon's edges).
+    let mut fedge = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut fpiece = usize::MAX;
+    let mut flen = -1.0f64;
+    for i in 0..outer.len() {
+        let (a, b) = (outer[i], outer[(i + 1) % outer.len()]);
+        let (nx, nz) = edge_normal(a, b);
+        if (nx - front.0).abs() < 0.1 && (nz - front.1).abs() < 0.1 {
+            let l = ((b[0] - a[0]).abs() + (b[1] - a[1]).abs()) as f64;
+            if l > flen {
+                flen = l;
+                fpiece = i;
+                fedge = (
+                    a[0] as f64 / MM,
+                    a[1] as f64 / MM,
+                    (b[0] - a[0]) as f64 / l,
+                    (b[1] - a[1]) as f64 / l,
+                    l / MM,
+                );
+            }
+        }
+    }
+    let dooru = infos
+        .iter()
+        .find(|o| o.kind == "door")
+        .map(|o| (o.u0 + o.u1) / 2.0);
+    let door_plan = dooru.map(|cx| (cx, 1.4, front.0, front.1));
+    // One jharokha per upper storey: the window nearest the piece centre.
+    let mut fwin: Vec<(u32, f64, f64)> = Vec::new();
+    for st in 1..floors {
+        let best = infos
+            .iter()
+            .filter(|o| o.kind == "window" && o.storey == st && o.piece == fpiece)
+            .min_by(|a, b| {
+                let c = fedge.4 / 2.0;
+                ((a.u0 + a.u1) / 2.0 - c)
+                    .abs()
+                    .total_cmp(&((b.u0 + b.u1) / 2.0 - c).abs())
+            });
+        if let Some(o) = best {
+            fwin.push((o.storey, o.u0, o.u1));
+        }
+    }
+    let mut top_y: Vec<f64> = (0..floors).map(|s| plinth + s as f64 * fh).collect();
+    top_y.push(plinth + floors as f64 * fh);
+    let (mut inst, mut pcols) =
+        parts::place_parts(spec, &mut rng2, door_plan, Some(fedge), &top_y, &fwin);
+    for pi in &mut inst {
+        if pi.kind == parts::PartKind::DoorLeaf {
+            if let Some(cx) = dooru {
+                let px = fedge.0 + fedge.2 * cx - front.0 * 0.10;
+                let pz = fedge.1 + fedge.3 * cx - front.1 * 0.10;
+                let ry = match (front.0 as i64, front.1 as i64) {
+                    (0, -1) => 2u8,
+                    (1, 0) => 3,
+                    (0, 1) => 0,
+                    _ => 1,
+                };
+                pi.transform = parts::place_transform(px as f32, plinth as f32, pz as f32, ry);
+            }
+        }
+    }
+    colliders.append(&mut pcols);
+    let instances = inst;
     let prims = |b: Bld| -> Vec<Prim> {
         b.prims
             .into_iter()
@@ -1336,6 +1416,7 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
             Lod { prims: prims(b1) },
             Lod { prims: prims(b2) },
         ],
+        instances,
         colliders,
         plaster_rgb,
         bounds: (mn, mx),
@@ -1345,7 +1426,7 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
 /// Every face carries an explicit flat normal; wind each triangle so its
 /// front face (counter-clockwise) agrees with that normal. Engines cull
 /// back faces, so a wrongly wound triangle would be invisible.
-fn orient_to_normals(mut p: Prim) -> Prim {
+pub(crate) fn orient_to_normals(mut p: Prim) -> Prim {
     for t in p.indices.chunks_mut(3) {
         let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
         let (e1, e2) = (

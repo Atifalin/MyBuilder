@@ -166,11 +166,37 @@ fn house_incremental() {
     let rep2 = bld_rep(&d);
     assert!(rep2.write.deleted_paths.iter().any(|p| p.contains("court")));
     assert!(!d.join("exports/houses/court/lod0.glb").exists());
-    // full == incremental
+    // full == incremental: every house export byte-identical.
+    let snapshot = |d: &Path| -> Vec<(String, String)> {
+        let m: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.join("exports/houses/manifest.json")).unwrap())
+                .unwrap();
+        let mut files: Vec<String> = vec!["houses/manifest.json".into()];
+        for h in m["houses"].as_array().unwrap() {
+            for l in ["lod0", "lod1", "lod2"] {
+                files.push(h["files"][l].as_str().unwrap().into());
+            }
+        }
+        for p in m["parts"].as_array().unwrap() {
+            for l in ["lod0", "lod1"] {
+                files.push(p["files"][l].as_str().unwrap().into());
+            }
+        }
+        files
+            .into_iter()
+            .map(|f| (f.clone(), hash(&d.join("exports").join(&f))))
+            .collect()
+    };
+    let incremental = snapshot(&d);
     let _ = std::fs::remove_dir_all(d.join("exports"));
     let mut o2 = opts(&d);
     o2.full = true;
     let _ = build_project(&d, &o2, &mb_pipeline::CancelToken::new()).unwrap();
+    assert_eq!(
+        incremental,
+        snapshot(&d),
+        "full rebuild differs from incremental"
+    );
 }
 
 #[test]
@@ -208,5 +234,18 @@ fn house_goldens() {
                 &bytes,
             );
         }
+    } // All part meshes the reference houses use, in manifest (key) order.
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("exports/houses/manifest.json")).unwrap())
+            .unwrap();
+    let mut parts = Vec::new();
+    for p in m["parts"].as_array().unwrap() {
+        for l in ["lod0", "lod1"] {
+            parts.extend(
+                std::fs::read(d.join("exports").join(p["files"][l].as_str().unwrap())).unwrap(),
+            );
+        }
     }
+    assert!(!parts.is_empty(), "reference houses use no parts");
+    mb_seed::golden::check_hash(env!("CARGO_MANIFEST_DIR"), "house_parts", &parts);
 }

@@ -1767,8 +1767,22 @@ impl mb_pipeline::Stage for HouseStage {
             .iter()
             .map(|c| serde_json::json!({"center": c.center, "half": c.half}))
             .collect();
+        let instances: Vec<serde_json::Value> = h
+            .instances
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "key": i.key,
+                    "kind": format!("{:?}", i.kind),
+                    "params": i.params,
+                    "transform": i.transform,
+                    "lods": i.lods,
+                })
+            })
+            .collect();
         let summary = serde_json::json!({
             "id": self.spec.id,
+            "instances": instances,
             "footprint": self.spec.footprint,
             "floors": self.spec.floors,
             "placement": self.spec.placement,
@@ -1781,6 +1795,91 @@ impl mb_pipeline::Stage for HouseStage {
         files.push((
             "summary.json".to_string(),
             serde_json::to_vec(&summary).unwrap_or_default(),
+        ));
+        Ok(crate::outputs::FileBundle { files }.encode())
+    }
+}
+
+/// Stage emitting all unique part GLBs (depends on every house.* stage).
+pub struct HousePartsStage {
+    deps: Vec<String>,
+    specs: Vec<mb_schema::HouseSpec>,
+    seeds: Vec<u64>,
+}
+
+impl HousePartsStage {
+    pub const ID: &'static str = "house.parts";
+    pub fn new(specs: Vec<mb_schema::HouseSpec>, project_seed: u64) -> Self {
+        HousePartsStage {
+            deps: specs.iter().map(|s| HouseStage::stage_id(&s.id)).collect(),
+            seeds: specs
+                .iter()
+                .map(|s| mb_house::house_seed(project_seed, &s.id))
+                .collect(),
+            specs,
+        }
+    }
+}
+
+impl mb_pipeline::Stage for HousePartsStage {
+    fn id(&self) -> &str {
+        Self::ID
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn code_version(&self) -> u32 {
+        mb_house::parts::PART_GENERATOR_VERSION + mb_house::CURRENT_HOUSE_GENERATOR_VERSION
+    }
+    fn params(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.specs).unwrap_or_default()
+    }
+    fn run(
+        &self,
+        _inputs: &[&mb_pipeline::Artifact],
+        _seed: u64,
+        _ctx: &mb_pipeline::RunCtx,
+    ) -> Result<mb_pipeline::Artifact, mb_pipeline::Cancelled> {
+        // Collect unique (key -> kind, params) across all houses.
+        let mut uniq: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+        for (spec, seed) in self.specs.iter().zip(&self.seeds) {
+            let h = mb_house::generate(spec, *seed);
+            for i in &h.instances {
+                uniq.entry(i.key.clone())
+                    .or_insert_with(|| (format!("{:?}", i.kind), i.params.clone()));
+            }
+        }
+        let mut files = Vec::new();
+        let mut entries = Vec::new();
+        for (key, (kind, params)) in &uniq {
+            let kind = match kind.as_str() {
+                "DoorLeaf" => mb_house::parts::PartKind::DoorLeaf,
+                "Chhatri" => mb_house::parts::PartKind::Chhatri,
+                "Jharokha" => mb_house::parts::PartKind::Jharokha,
+                _ => mb_house::parts::PartKind::Bracket,
+            };
+            let (mut t, mut e) = ([0usize; 2], Vec::new());
+            for lod1 in [false, true] {
+                let lod = mb_house::parts::build_part(kind, params, lod1);
+                t[lod1 as usize] = lod.prims.iter().map(|p| p.indices.len() / 3).sum();
+                e.push((
+                    format!("lod{}.glb", lod1 as usize),
+                    mb_house::glb::lod_glb(&lod, key, lod1 as u8, [0.9, 0.84, 0.72]),
+                ));
+            }
+            for (rel, bytes) in e {
+                files.push((format!("parts/{key}/{rel}"), bytes));
+            }
+            entries.push(serde_json::json!({
+                "key": key, "kind": format!("{:?}", kind), "params": params,
+                "files": {"lod0": format!("houses/parts/{key}/lod0.glb"), "lod1": format!("houses/parts/{key}/lod1.glb")},
+                "tris": {"lod0": t[0], "lod1": t[1]},
+            }));
+        }
+        files.push((
+            "parts.json".to_string(),
+            serde_json::to_vec(&entries).unwrap_or_default(),
         ));
         Ok(crate::outputs::FileBundle { files }.encode())
     }

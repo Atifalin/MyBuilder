@@ -9,6 +9,8 @@
 
 use mb_schema::{Footprint, HouseSpec, Side};
 
+pub mod glb;
+
 pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 1;
 
 pub fn house_seed(project_seed: u64, id: &str) -> u64 {
@@ -24,6 +26,7 @@ pub enum Mat {
     Floor,
     Opening,
 }
+pub(crate) const MATS_ORDER: [Mat; 5] = MATS;
 const MATS: [Mat; 5] = [
     Mat::Plaster,
     Mat::Stone,
@@ -129,6 +132,29 @@ impl Bld {
             }
         }
     }
+    /// Quad with flat normal `n`, wound to face `n` whatever the corner
+    /// order; UVs are world meters in the plane of the quad.
+    fn quad_facing(&mut self, mat: Mat, q: [[f32; 3]; 4], n: [f32; 3]) {
+        let e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+        let e2 = [q[2][0] - q[1][0], q[2][1] - q[1][1], q[2][2] - q[1][2]];
+        let cr = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let rev = cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2] < 0.0;
+        let uv: Vec<[f32; 2]> = q
+            .iter()
+            .map(|p| {
+                if n[1].abs() > 0.5 {
+                    [p[0], p[2]]
+                } else {
+                    [p[0] + p[2], p[1]]
+                }
+            })
+            .collect();
+        self.poly(mat, &q, n, &uv, rev);
+    }
     /// Quad helper (a,b,c,d CCW as seen from `n`).
     #[allow(clippy::too_many_arguments)]
     fn quad(
@@ -232,7 +258,11 @@ fn opening_poly(u0: i64, v0: i64, w: i64, h: i64, arch: bool, seg: usize) -> Vec
         return vec![[u0, v0], [u0 + w, v0], [u0 + w, v0 + h], [u0, v0 + h]];
     }
     let w2 = w as f64;
-    let ha = (w2 * std::f64::consts::FRAC_1_SQRT_2) as i64; // apex height = sqrt(0.75^2-0.25^2)*w
+    // Full pointed-arch rise is sqrt(0.75^2 - 0.25^2) * w = w / sqrt(2);
+    // on wide, short openings squash it vertically to 60% of the height.
+    let full = w2 * std::f64::consts::FRAC_1_SQRT_2;
+    let sy = (0.6 * h as f64 / full).min(1.0);
+    let ha = (full * sy).round() as i64;
     let spring = v0 + h - ha;
     let cx = u0 as f64 + w2 / 2.0;
     let (cos_t, sin_t) = match seg {
@@ -246,16 +276,16 @@ fn opening_poly(u0: i64, v0: i64, w: i64, h: i64, arch: bool, seg: usize) -> Vec
     let mut right = Vec::new();
     for i in 0..cos_t.len() - 1 {
         let x = cx - w2 / 4.0 + (0.75 * w2) * cos_t[i];
-        let y = spring as f64 + (0.75 * w2) * sin_t[i];
+        let y = spring as f64 + (0.75 * w2) * sin_t[i] * sy;
         right.push([x.round() as i64, y.round() as i64]);
     }
     pts.extend_from_slice(&right);
     pts.push([cx.round() as i64, spring + ha]); // apex
     // Left arc (mirror): centre (cx + w/4, spring), points
     // centre + r*(-cos, sin), from the apex down to the left spring (u0).
-    for i in (0..cos_t.len()).rev() {
+    for i in (0..cos_t.len() - 1).rev() {
         let x = cx + w2 / 4.0 - (0.75 * w2) * cos_t[i];
-        let y = spring as f64 + (0.75 * w2) * sin_t[i];
+        let y = spring as f64 + (0.75 * w2) * sin_t[i] * sy;
         let px = [x.round() as i64, y.round() as i64];
         if pts.last() != Some(&px) {
             pts.push(px);
@@ -356,31 +386,24 @@ fn storey_pieces(
         }
         pieces.push(pc);
     }
-    // Door on the front piece: replace bay nearest the piece centre.
+    // Door at the centre of the front piece; windows it would overlap
+    // (with a 0.3 m pier on each side) are dropped.
     if front_i != usize::MAX && storey == 0 {
         let pc = &mut pieces[front_i];
-        if !pc.openings.is_empty() {
-            let centre = pc.len / 2;
-            let best = pc
-                .openings
-                .iter()
-                .enumerate()
-                .map(|(k, (o, _))| (k, (o[0][0] + (o[1][0] - o[0][0]) / 2 - centre).abs()))
-                .min_by_key(|(_, d)| *d)
-                .map(|(k, _)| k)
-                .unwrap();
-            pc.openings.remove(best);
-            infos.retain(|o| {
-                !(o.piece == front_i
-                    && o.storey == 0
-                    && o.kind == "window"
-                    && pc.openings.iter().all(|x| x.0 != o_to_poly(o)))
-            });
-        }
         let dw = mm(1.4);
         let dh = mm(2.6);
         let u0 = (pc.len - dw) / 2;
         if u0 >= mm(0.6) && pc.len - (u0 + dw) >= mm(0.6) {
+            let (lo, hi) = (u0 - mm(0.3), u0 + dw + mm(0.3));
+            let clear = |a: i64, b: i64| b <= lo || a >= hi;
+            pc.openings.retain(|(o, _)| {
+                let (a, b) = (
+                    o.iter().map(|p| p[0]).min().unwrap(),
+                    o.iter().map(|p| p[0]).max().unwrap(),
+                );
+                clear(a, b)
+            });
+            infos.retain(|o| !(o.piece == front_i && o.storey == 0 && !clear(mm(o.u0), mm(o.u1))));
             pc.openings
                 .push((opening_poly(u0, 0, dw, dh, true, seg), "door"));
             infos.push(OpeningInfo {
@@ -397,9 +420,6 @@ fn storey_pieces(
     }
     pieces
 }
-fn o_to_poly(o: &OpeningInfo) -> Vec<P2> {
-    vec![[mm(o.u0), mm(o.v0)], [mm(o.u1), mm(o.v1)]]
-}
 
 /// Emit a wall face (with holes) for a piece edge.
 /// `y0` base height, `h` storey height, direction flips for inner face.
@@ -415,10 +435,25 @@ fn wall_face(
     nrm: [f32; 3],
     mat: Mat,
 ) {
-    let outer: Vec<P2> = vec![[0, 0], [len, 0], [len, h], [0, h]];
-    let tri = match mb_geom::triangulate_with_holes(&outer, holes) {
+    // Openings that reach the bottom edge (doors) are notches in the
+    // outline, not holes: walk the bottom edge left to right and detour
+    // up and over each door, i.e. along its CCW outline in reverse.
+    let (mut notches, holes): (Vec<&Vec<P2>>, Vec<&Vec<P2>>) =
+        holes.iter().partition(|o| o.iter().any(|p| p[1] <= 0));
+    notches.sort_by_key(|o| o.iter().map(|p| p[0]).min());
+    let mut outer: Vec<P2> = vec![[0, 0]];
+    for o in notches {
+        let start = (0..o.len())
+            .min_by_key(|&i| (o[i][1], o[i][0]))
+            .expect("non-empty opening");
+        outer.extend((0..o.len()).map(|k| o[(start + o.len() - k) % o.len()]));
+    }
+    outer.extend([[len, 0], [len, h], [0, h]]);
+    outer.dedup();
+    let holes: Vec<Vec<P2>> = holes.into_iter().cloned().collect();
+    let tri = match mb_geom::triangulate_with_holes(&outer, &holes) {
         Ok(t) => t,
-        Err(_) => return,
+        Err(e) => panic!("wall face {e:?}: len={len} h={h} outer={outer:?} holes={holes:?}"),
     };
     let pr = &mut b.prims[mat as usize];
     let base = pr.positions.len() as u32;
@@ -434,7 +469,7 @@ fn wall_face(
     for p in &outer {
         emit(p[0], p[1]);
     }
-    for hole in holes {
+    for hole in &holes {
         for p in hole {
             emit(p[0], p[1]);
         }
@@ -476,16 +511,18 @@ fn reveals(b: &mut Bld, poly: &[P2], a: P2, dir: (f64, f64), y0: i64, nxz: (f64,
         // normal perpendicular to the reveal edge in wall plane
         let eu = (q[0] - p[0]) as f64;
         let ev = (q[1] - p[1]) as f64;
-        // reveal normal ~ perpendicular to edge, in the wall plane
-        let nl = (ev * dir.0 - eu * nxz.0, ev * dir.1 - eu * nxz.1);
-        let ll = (nl.0 * nl.0 + nl.1 * nl.1).sqrt().max(1e-9);
-        let nrm = [(nl.0 / ll) as f32, 0.0, (nl.1 / ll) as f32];
-        let uv = [
-            [m(p[0]), m(y0) + m(p[1])],
-            [m(q[0]), m(y0) + m(q[1])],
-            [m(q[0]), m(y0) + m(q[1])],
-            [m(p[0]), m(y0) + m(p[1])],
+        // The reveal faces the opening's centre: for a CCW outline in the
+        // wall's (u along `dir`, v up) plane the inward edge normal is
+        // (-ev, eu), i.e. -ev along `dir` plus eu straight up.
+        let ll = (eu * eu + ev * ev).sqrt().max(1e-9);
+        let nrm = [
+            (-ev * dir.0 / ll) as f32,
+            (eu / ll) as f32,
+            (-ev * dir.1 / ll) as f32,
         ];
+        // Meter UVs: u along the outline edge, v through the thickness.
+        let (el, tt) = ((ll / MM) as f32, t as f32);
+        let uv = [[0.0, 0.0], [el, 0.0], [el, tt], [0.0, tt]];
         b.poly(
             Mat::Stone,
             &[out_p, out_q, off(out_q), off(out_p)],
@@ -730,9 +767,9 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
                     let base = pr.positions.len() as u32;
                     for p in o {
                         pr.positions.push([
-                            m(pc.a[0]) + pc.dir.0 as f32 * m(p[0]) - pc.nrm.0 as f32 * 0.01,
+                            m(pc.a[0]) + pc.dir.0 as f32 * m(p[0]) + pc.nrm.0 as f32 * 0.01,
                             m(y0) + m(p[1]),
-                            m(pc.a[1]) + pc.dir.1 as f32 * m(p[0]) - pc.nrm.1 as f32 * 0.01,
+                            m(pc.a[1]) + pc.dir.1 as f32 * m(p[0]) + pc.nrm.1 as f32 * 0.01,
                         ]);
                         pr.normals.push(nrm3);
                         pr.uvs.push([m(p[0]), m(y0) + m(p[1])]);
@@ -806,12 +843,15 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
             }
             let _ = i;
         }
-        // courtyard inner walls at complexity>=1
-        if spec.complexity >= 1 && court.is_some() {
+        // Courtyard walls: `co` (room side) is the outer edge of each
+        // piece, `c` (court side) the inner one.
+        if court.is_some() {
             if let (Some(c), Some(co)) = (&court, &court_out) {
                 let pieces = storey_pieces(co, c, front, s, &mut rng, pitch, kw, spec, &mut infos);
                 for pc in &pieces {
-                    let nrm3 = [-pc.nrm.0 as f32, 0.0, -pc.nrm.1 as f32]; // face into court
+                    // pc.nrm points away from the court, into the rooms; the face on
+                    // `co` faces the rooms, the face on `c` faces the court.
+                    let nrm3 = [pc.nrm.0 as f32, 0.0, pc.nrm.1 as f32];
                     let holes: Vec<Vec<P2>> = pc.openings.iter().map(|(o, _)| o.clone()).collect();
                     wall_face(
                         &mut lod[0],
@@ -1051,61 +1091,50 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
                 ],
             }),
     );
-    // steps at the door
-    if let Some(di) = infos.iter().find(|o| o.kind == "door") {
-        let dw = di.u1 - di.u0;
-        let dcx = (di.u0 + di.u1) / 2.0;
-        let (fdx, fdz) = front;
-        // front piece's centre u maps along its edge; use door u mid on
-        // the front side: approximate door centre in plan via the front
-        // side coordinate (works for rect; good enough for steps).
-        let _ = dcx;
-        for (step, hgt) in [(0usize, plinth * 2.0 / 3.0), (1, plinth / 3.0)] {
-            let zc = if fdz < 0.0 { -(m(-mm(0.0))) + 0.0 } else { 0.0 };
-            let _ = zc;
-            let depth = 0.6 * (step as f32 + 1.0);
-            let wdt = dw as f32 + 0.6;
-            // place against the front face: compute the front side's
-            // outer z/x from the front piece (find edge with front dir).
-            let mut fx = 0.0f32;
-            let mut fz = 0.0f32;
-            for i in 0..outer.len() {
-                let (a, b) = (outer[i], outer[(i + 1) % outer.len()]);
-                let (nx, nz) = edge_normal(a, b);
-                if (nx - fdx).abs() < 0.1 && (nz - fdz).abs() < 0.1 {
-                    // door centre = edge start + u_mid along dir
-                    let um = mm(dcx);
-                    fx = m(a[0])
-                        + ((b[0] - a[0]) as f32 / 1000.0) * 0.0
-                        + (b[0] - a[0]) as f32 / 1000.0 * 0.0;
-                    let _ = fx;
-                    fx = m(a[0])
-                        + ((b[0] - a[0]) as f32
-                            / (m((b[0] - a[0]).abs() + (b[1] - a[1]).abs()) * 1000.0))
-                            * m(um)
-                            * 1000.0;
-                    fz = m(a[1])
-                        + ((b[1] - a[1]) as f32
-                            / (m((b[0] - a[0]).abs() + (b[1] - a[1]).abs()) * 1000.0))
-                            * m(um)
-                            * 1000.0;
-                    fz += fdz as f32 * (depth / 2.0 + 0.0);
-                    fx += fdx as f32 * (depth / 2.0 + 0.0);
-                }
-            }
-            lod[0].quad(
-                Mat::Stone,
-                [fx - wdt / 2.0, hgt as f32, fz - depth / 2.0],
-                [fx + wdt / 2.0, hgt as f32, fz - depth / 2.0],
-                [fx + wdt / 2.0, hgt as f32, fz + depth / 2.0],
-                [fx - wdt / 2.0, hgt as f32, fz + depth / 2.0],
-                [0.0, 1.0, 0.0],
-                &[[0.0; 2]; 4],
-                false,
-            );
+    // Steps at the main door: two treads stepping down outward from the
+    // plinth edge (0.4 m beyond the wall face), each 0.6 m deep.
+    if let Some(di) = infos
+        .iter()
+        .find(|o| o.kind == "door" && o.piece < outer.len())
+    {
+        let (a, b) = (outer[di.piece], outer[(di.piece + 1) % outer.len()]);
+        let (ex, ez) = ((b[0] - a[0]) as f64, (b[1] - a[1]) as f64);
+        let len = (ex * ex + ez * ez).sqrt();
+        let dir = ((b[0] - a[0]) as f64 / len, (b[1] - a[1]) as f64 / len);
+        let nrm = edge_normal(a, b);
+        let um = (di.u0 + di.u1) / 2.0;
+        let (px, pz) = (m(a[0]) as f64 + dir.0 * um, m(a[1]) as f64 + dir.1 * um);
+        let half_w = (di.u1 - di.u0) / 2.0 + 0.3;
+        let at = |t: f64, d: f64, y: f64| -> [f32; 3] {
+            [
+                (px + dir.0 * t + nrm.0 * d) as f32,
+                y as f32,
+                (pz + dir.1 * t + nrm.1 * d) as f32,
+            ]
+        };
+        for k in 0..2 {
+            let (d0, d1) = (0.4 + 0.6 * k as f64, 1.0 + 0.6 * k as f64);
+            let h = plinth * (2 - k) as f64 / 3.0;
+            let top = [
+                at(-half_w, d0, h),
+                at(half_w, d0, h),
+                at(half_w, d1, h),
+                at(-half_w, d1, h),
+            ];
+            lod[0].quad_facing(Mat::Stone, top, [0.0, 1.0, 0.0]);
+            let riser = [
+                at(-half_w, d1, 0.0),
+                at(half_w, d1, 0.0),
+                at(half_w, d1, h),
+                at(-half_w, d1, h),
+            ];
+            lod[0].quad_facing(Mat::Stone, riser, [nrm.0 as f32, 0.0, nrm.1 as f32]);
+            let (lo, hi) = (at(-half_w, d0, 0.0), at(half_w, d1, h));
+            let c = |i: usize| (lo[i] + hi[i]) / 2.0;
+            let hh = |i: usize| (hi[i] - lo[i]).abs() / 2.0;
             colliders.push(BoxCollider {
-                center: [fx, hgt as f32 / 2.0, fz],
-                half: [wdt / 2.0, hgt as f32 / 2.0, depth / 2.0],
+                center: [c(0), c(1), c(2)],
+                half: [hh(0), hh(1), hh(2)],
             });
         }
     }
@@ -1297,6 +1326,7 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
         b.prims
             .into_iter()
             .filter(|p| !p.indices.is_empty())
+            .map(orient_to_normals)
             .collect()
     };
     let [b0, b1, b2] = lod;
@@ -1310,6 +1340,27 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
         plaster_rgb,
         bounds: (mn, mx),
     }
+}
+
+/// Every face carries an explicit flat normal; wind each triangle so its
+/// front face (counter-clockwise) agrees with that normal. Engines cull
+/// back faces, so a wrongly wound triangle would be invisible.
+fn orient_to_normals(mut p: Prim) -> Prim {
+    for t in p.indices.chunks_mut(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+        let (e1, e2) = (
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+            [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+        );
+        let n = p.normals[t[0] as usize];
+        let dot = (e1[1] * e2[2] - e1[2] * e2[1]) * n[0]
+            + (e1[2] * e2[0] - e1[0] * e2[2]) * n[1]
+            + (e1[0] * e2[1] - e1[1] * e2[0]) * n[2];
+        if dot < 0.0 {
+            t.swap(1, 2);
+        }
+    }
+    p
 }
 
 /// Debug: openings with their piece/u-v spans (for tests).
@@ -1354,7 +1405,13 @@ mod arch_tests {
     #[test]
     fn arch_outline_is_simple_and_inside_the_opening() {
         for seg in [2usize, 4] {
-            for (w, h) in [(1400i64, 2600i64), (800, 1500), (600, 1500)] {
+            for (w, h) in [
+                (1400i64, 2600i64),
+                (800, 1500),
+                (600, 1500),
+                (1700, 1500),
+                (2400, 1500),
+            ] {
                 let (u0, v0) = (5000, 900);
                 let p = opening_poly(u0, v0, w, h, true, seg);
                 assert!(area2(&p) > 0, "outline must be CCW");

@@ -1706,3 +1706,82 @@ impl Stage for ManifestStage {
         })
     }
 }
+
+// ---------------------------------------------------------------------
+// House stages (Phase 3): one stage per house, independent of terrain.
+// ---------------------------------------------------------------------
+
+/// Stage producing the 3 LOD GLBs + manifest summary for one house.
+pub struct HouseStage {
+    id: String,
+    spec: mb_schema::HouseSpec,
+    seed: u64,
+}
+
+impl HouseStage {
+    pub fn new(spec: mb_schema::HouseSpec, project_seed: u64) -> Self {
+        HouseStage {
+            id: format!("house.{}", spec.id),
+            seed: mb_house::house_seed(project_seed, &spec.id),
+            spec,
+        }
+    }
+    pub fn stage_id(id: &str) -> String {
+        format!("house.{id}")
+    }
+}
+
+impl mb_pipeline::Stage for HouseStage {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn deps(&self) -> &[String] {
+        &[]
+    }
+    fn code_version(&self) -> u32 {
+        mb_house::CURRENT_HOUSE_GENERATOR_VERSION
+    }
+    fn params(&self) -> Vec<u8> {
+        let mut b = serde_json::to_vec(&self.spec).unwrap_or_default();
+        b.extend_from_slice(&self.seed.to_le_bytes());
+        b
+    }
+    fn run(
+        &self,
+        _inputs: &[&mb_pipeline::Artifact],
+        _seed: u64,
+        _ctx: &mb_pipeline::RunCtx,
+    ) -> Result<mb_pipeline::Artifact, mb_pipeline::Cancelled> {
+        let h = mb_house::generate(&self.spec, self.seed);
+        let mut files = Vec::new();
+        let mut tris = [0usize; 3];
+        for (li, lod) in h.lods.iter().enumerate() {
+            tris[li] = lod.prims.iter().map(|p| p.indices.len() / 3).sum();
+            files.push((
+                format!("lod{li}.glb"),
+                mb_house::glb::lod_glb(lod, &self.spec.id, li as u8, h.plaster_rgb),
+            ));
+        }
+        let colliders: Vec<serde_json::Value> = h
+            .colliders
+            .iter()
+            .map(|c| serde_json::json!({"center": c.center, "half": c.half}))
+            .collect();
+        let summary = serde_json::json!({
+            "id": self.spec.id,
+            "footprint": self.spec.footprint,
+            "floors": self.spec.floors,
+            "placement": self.spec.placement,
+            "tris": {"lod0": tris[0], "lod1": tris[1], "lod2": tris[2]},
+            "materials": mb_house::glb::MAT_NAMES,
+            "colliders": colliders,
+            "bounds": {"min": h.bounds.0, "max": h.bounds.1},
+            "plaster_rgb": h.plaster_rgb,
+        });
+        files.push((
+            "summary.json".to_string(),
+            serde_json::to_vec(&summary).unwrap_or_default(),
+        ));
+        Ok(crate::outputs::FileBundle { files }.encode())
+    }
+}

@@ -114,6 +114,7 @@ pub fn listed_outputs(dir: &Path) -> Vec<String> {
 pub fn may_delete(dir: &Path, rel: &str) -> bool {
     mb_schema::confined_rel_path_is_safe(rel)
         && (rel.starts_with("exports/terrain/")
+            || rel.starts_with("exports/houses/")
             || rel.starts_with("layers/")
             || rel.starts_with("previews/")
             || rel.starts_with("overrides/"))
@@ -166,6 +167,7 @@ pub fn sea_ring_file(grid: &crate::Grid, sea: f64) -> (String, Vec<u8>) {
 fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
     let mut out = vec![
         ("exports/terrain/manifest.json".to_string(), true),
+        ("exports/houses/manifest.json".to_string(), true),
         ("layers/layers.json".to_string(), true),
     ];
     let mut push = |full: String, raw: &str| {
@@ -204,6 +206,18 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                             push(format!("exports/terrain/{f}"), f);
                         }
                     }
+                }
+            }
+        }
+    }
+    if let Ok(t) = std::fs::read(dir.join("exports/houses/manifest.json"))
+        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&t)
+        && let Some(hs) = v["houses"].as_array()
+    {
+        for h in hs {
+            for k in ["lod0", "lod1", "lod2"] {
+                if let Some(f) = h["files"][k].as_str() {
+                    push(format!("exports/{f}"), f);
                 }
             }
         }
@@ -290,12 +304,14 @@ fn write_outputs(dir: &Path, outputs: &FileBundle) -> std::io::Result<WriteRepor
         deleted_paths: Vec::new(),
     };
     let mut ordered: Vec<&(String, Vec<u8>)> = outputs.files.iter().collect();
-    ordered.sort_by_key(|(p, _)| (*p != MANIFEST_PATH) as u8); // manifest last
+    ordered
+        .sort_by_key(|(p, _)| (*p != MANIFEST_PATH && *p != "exports/houses/manifest.json") as u8); // manifests last
     /// A path is confined if it is a safe relative path AND lives under
     /// one of our output roots (by path components).
     fn confined(rel: &str) -> bool {
         mb_schema::confined_rel_path_is_safe(rel)
             && (rel.starts_with("exports/terrain/")
+                || rel.starts_with("exports/houses/")
                 || rel.starts_with("layers/")
                 || rel.starts_with("previews/"))
     }
@@ -343,6 +359,7 @@ fn collect_outputs(
     grid: &crate::Grid,
     world: &WorldRecipe,
     gen3: bool,
+    houses: &[mb_schema::HouseSpec],
 ) -> FileBundle {
     let mut files = Vec::new();
     let layers = FileBundle::decode(&run_artifacts(LayersStage::ID).unwrap().bytes);
@@ -415,6 +432,51 @@ fn collect_outputs(
     }
     let manifest = run_artifacts(ManifestStage::ID).unwrap();
     files.push((MANIFEST_PATH.to_string(), manifest.bytes.clone()));
+    // Houses: each stage artifact is a FileBundle with lod*.glb +
+    // summary.json; re-path them under exports/houses/<id>/.
+    if !houses.is_empty() {
+        let mut summaries = Vec::new();
+        for h in houses {
+            let a = run_artifacts(&crate::stages::HouseStage::stage_id(&h.id))
+                .unwrap_or_else(|| panic!("missing house stage {}", h.id));
+            let bundle = FileBundle::decode(&a.bytes);
+            for (rel, bytes) in bundle.files {
+                if rel == "summary.json" {
+                    summaries.push(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap());
+                } else {
+                    files.push((format!("exports/houses/{}/{rel}", h.id), bytes));
+                }
+            }
+        }
+        summaries.sort_by_key(|v| v["id"].as_str().unwrap_or("").to_string());
+        let mut entries = Vec::new();
+        for sm in summaries {
+            let id = sm["id"].as_str().unwrap().to_string();
+            entries.push(serde_json::json!({
+                "id": id,
+                "footprint": sm["footprint"],
+                "floors": sm["floors"],
+                "placement": sm["placement"],
+                "files": {
+                    "lod0": format!("houses/{id}/lod0.glb"),
+                    "lod1": format!("houses/{id}/lod1.glb"),
+                    "lod2": format!("houses/{id}/lod2.glb"),
+                },
+                "tris": sm["tris"],
+                "materials": sm["materials"],
+                "colliders": sm["colliders"],
+                "bounds": sm["bounds"],
+            }));
+        }
+        let hm = serde_json::json!({
+            "house_generator_version": mb_house::CURRENT_HOUSE_GENERATOR_VERSION,
+            "houses": entries,
+        });
+        files.push((
+            "exports/houses/manifest.json".to_string(),
+            serde_json::to_vec_pretty(&hm).unwrap(),
+        ));
+    }
     FileBundle { files }
 }
 
@@ -557,6 +619,21 @@ pub fn build_project_observed(
         }
     }
 
+    let houses: Vec<mb_schema::HouseSpec> =
+        match mb_schema::load_houses(dir, &project).map_err(BuildError::Schema)? {
+            Some(r) => {
+                let diags = mb_schema::validate_houses(&r);
+                if diags
+                    .iter()
+                    .any(|d| d.severity == mb_schema::Severity::Error)
+                {
+                    return Err(BuildError::Validation(diags));
+                }
+                info.extend(diags);
+                r.houses
+            }
+            None => Vec::new(),
+        };
     let cell = project.world_scale.cell_size_m;
     let grid = crate::Grid::new(world.extent.width_m, world.extent.depth_m, cell);
     let mut pipe = Pipeline::new(project.seed, project.generator_version);
@@ -620,6 +697,12 @@ pub fn build_project_observed(
             }
         }
     }
+    for h in &houses {
+        pipe.add(Box::new(crate::stages::HouseStage::new(
+            h.clone(),
+            project.seed,
+        )));
+    }
     pipe.add(Box::new(ManifestStage::new(
         grid,
         project.clone(),
@@ -660,7 +743,13 @@ pub fn build_project_observed(
         }
     }
     let lookup = |id: &str| owned.iter().find(|(k, _)| k == id).map(|(_, a)| a.clone());
-    let outputs = collect_outputs(&lookup, &grid, &world, project.generator_version >= 3);
+    let outputs = collect_outputs(
+        &lookup,
+        &grid,
+        &world,
+        project.generator_version >= 3,
+        &houses,
+    );
     let write = write_outputs(dir, &outputs)?;
     Ok(BuildReport {
         diagnostics: info,

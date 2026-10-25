@@ -304,3 +304,70 @@ fn courtyard_slab_clear() {
         }
     }
 }
+
+#[test]
+fn bounds_stay_near_the_footprint() {
+    for s in sweep() {
+        let h = generate(&s, house_seed(1, &s.id));
+        let (w, d) = match s.footprint {
+            Footprint::Rect { w, d }
+            | Footprint::L { w, d, .. }
+            | Footprint::Courtyard { w, d, .. } => (w, d),
+        };
+        let mb_schema::Roof::Flat { parapet_m } = s.roof;
+        let top = s.plinth_m + s.floors as f64 * s.floor_height_m + 0.2 + parapet_m + 0.5;
+        let reach = (w.max(d) / 2.0 + 2.5) as f32;
+        let (lo, hi) = h.bounds;
+        assert!(
+            lo[0] >= -reach && hi[0] <= reach && lo[2] >= -reach && hi[2] <= reach,
+            "{} xz {:?}",
+            s.id,
+            h.bounds
+        );
+        assert!(
+            lo[1] >= -1e-4 && hi[1] <= top as f32,
+            "{} y {:?}",
+            s.id,
+            h.bounds
+        );
+    }
+}
+
+#[test]
+fn winding_matches_normals() {
+    let mut stats = std::collections::BTreeMap::<String, (u32, u32)>::new();
+    for s in sweep() {
+        let h = generate(&s, house_seed(1, &s.id));
+        for (li, l) in h.lods.iter().enumerate() {
+            for p in &l.prims {
+                for t in p.indices.chunks(3) {
+                    let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+                    let (e1, e2) = (
+                        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                    );
+                    let cr = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let n = p.normals[t[0] as usize];
+                    let dot = cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2];
+                    let e = stats
+                        .entry(format!(
+                            "lod{li} {:?} n={:?}",
+                            p.mat,
+                            n.map(|v| v.round() as i32)
+                        ))
+                        .or_insert((0, 0));
+                    if dot > 0.0 { e.0 += 1 } else { e.1 += 1 }
+                }
+            }
+        }
+    }
+    let bad: Vec<_> = stats.iter().filter(|(_, v)| v.1 > 0).collect();
+    for (k, v) in &bad {
+        println!("{k}: ok={} bad={}", v.0, v.1);
+    }
+    assert!(bad.is_empty(), "triangles facing against their normals");
+}

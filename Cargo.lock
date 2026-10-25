@@ -397,6 +397,7 @@ name = "mb-terrain"
 version = "0.1.0"
 dependencies = [
  "mb-geom",
+ "mb-house",
  "mb-pipeline",
  "mb-schema",
  "mb-seed",

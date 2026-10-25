@@ -64,6 +64,17 @@ probe 2ea5ca993b84f1be29e078663e8f2b0edff151170f71fdd346ade3ffce37f3b7
 
 ## Project folder format
 
+`mybuilder new` also accepts the wizard options (none given -> unchanged defaults):
+
+```sh
+mybuilder new <dir> [--name N] [--seed HEX] [--size 1024|2048|4096] \
+    [--feel bumpy|hilly|mountainous] [--start water-first|land-first]
+```
+
+`water-first` starts with the 12-point island blob scaled to the size;
+`land-first` starts all-land (no sea at the world edge until you carve
+coasts with a Water shape).
+
 `mybuilder new` creates:
 
 ```
@@ -399,6 +410,20 @@ Build (full rebuild), Rebuild (incremental), Clear all & new seed
 (modal with "keep overrides"), Cancel, a tiled hillshade map (drag to
 pan, wheel to zoom z∈[-2,6] at 8·2^-z m/px), and a live log with
 progress and per-stage timings.
+
+The "New project…" button opens a 4-step wizard (name+folder, size,
+feel, start) backed by `mb_bridge::new_project`; it creates the project,
+opens it with a fresh undo history and kicks off a full build.
+
+Autotest hooks: `MB_APP_AUTOTEST=<project>` drives the open-project path;
+`MB_APP_AUTOTEST_NEW=<parent dir>` drives the wizard path (create, build,
+land+water strokes, undo/redo, rebuild, output checks). The wizard build
+needs release-mode speed — run it against `target/app/release/mb-app`.
+
+Phase 2 exit gate: `scripts/phase2-exit-gate.sh` builds the release app,
+runs the wizard autotest into `target/gates/exit/`, benches the created
+project with `fly-bench.sh` (p1_low >= 60 fps, max frame < 33 ms) and
+prints `PHASE 2 EXIT GATE PASS`.
 
 Limits today: terrain editing is feel/octaves plus shape draw/remove;
 no edit-by-drag or vertex editing yet, and the app is macOS-verified

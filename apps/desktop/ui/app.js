@@ -263,6 +263,62 @@ listen("build-event", (ev) => {
   }
 });
 listen("preview-updated", () => { tiles.clear(); refresh(); });
+// ---- New project wizard ----
+const wz = { step: 0, size: 2048, feel: "hilly", start: "water-first" };
+function wzShow() {
+  document.querySelectorAll(".wz-step").forEach((s) =>
+    s.classList.toggle("hidden", +s.dataset.step !== wz.step));
+  $("wzBack").disabled = wz.step === 0;
+  $("wzNext").classList.toggle("hidden", wz.step === 3);
+  $("wzCreate").classList.toggle("hidden", wz.step !== 3);
+  $("wzErr").textContent = "";
+}
+document.querySelectorAll("#wizard .card").forEach((c) => c.onclick = () => {
+  c.parentElement.querySelectorAll(".card").forEach((x) => x.classList.remove("on"));
+  c.classList.add("on");
+  const v = c.dataset.v;
+  if (["1024","2048","4096"].includes(v)) wz.size = +v;
+  else if (["bumpy","hilly","mountainous"].includes(v)) wz.feel = v;
+  else wz.start = v;
+});
+$("newBtn").onclick = () => {
+  document.querySelectorAll('.wz-step[data-step="1"] .card')[1].classList.add("on");
+  document.querySelectorAll('.wz-step[data-step="2"] .card')[1].classList.add("on");
+  document.querySelectorAll('.wz-step[data-step="3"] .card')[0].classList.add("on");
+  wz.step = 0; wzShow();
+  $("wizard").classList.remove("hidden");
+};
+$("wzPick").onclick = safe(async () => {
+  const sel = await T.dialog.open({ directory: true });
+  if (sel) $("wzParent").value = sel;
+});
+$("wzBack").onclick = () => { wz.step = Math.max(0, wz.step - 1); wzShow(); };
+$("wzNext").onclick = () => {
+  if (wz.step === 0) {
+    if (!$("wzName").value.trim()) { $("wzErr").textContent = "name required"; return; }
+    if (!$("wzParent").value.trim()) { $("wzErr").textContent = "pick a parent folder"; return; }
+  }
+  wz.step = Math.min(3, wz.step + 1); wzShow();
+};
+$("wzCancel").onclick = () => $("wizard").classList.add("hidden");
+const sanitizeName = (s) => s.replace(/[^A-Za-z0-9 _-]/g, "_").trim();
+async function wizardCreate(opts) {
+  const name = sanitizeName(opts?.name ?? $("wzName").value);
+  const parent = opts?.parent ?? $("wzParent").value;
+  const st2 = await invoke("new_project", {
+    parent, name, sizeM: opts?.size ?? wz.size,
+    feel: opts?.feel ?? wz.feel, start: opts?.start ?? wz.start,
+  });
+  return st2;
+}
+$("wzCreate").onclick = safe(async () => {
+  try {
+    await wizardCreate();
+    $("wizard").classList.add("hidden");
+    tiles.clear(); fit = false; refresh();
+    log("project created; full build started", "log-ok");
+  } catch (e) { $("wzErr").textContent = String(e); }
+});
 // autotest: frontend-driven script when MB_APP_AUTOTEST is set
 async function autotest() {
   const rep = { events: {}, tiles_alpha: 0, can_undo: false, can_redo: false, status1: "", status2: "", shapes_after: 0, tile_changed: false, unhandled: 0 };
@@ -344,10 +400,101 @@ async function autotest() {
 
   await invoke("autotest_report", { report: JSON.stringify(rep) });
 }
+// Wizard autotest (MB_APP_AUTOTEST_NEW=<parent dir>): drives the real
+// wizard path — create, wait for build, draw land + water strokes through
+// the canvas add path, undo/redo, rebuild, verify outputs.
+async function autotestNew() {
+  const rep = { wizard: true, created: false, events: {}, tiles_alpha: 0,
+    land_shape: false, water_shape: false, undo_ok: false, redo_ok: false,
+    manifest: false, status_build: "", status_rebuild: "", unhandled: 0 };
+  let unhandled = 0;
+  const origOnRej = window.onunhandledrejection;
+  window.onunhandledrejection = (e) => { unhandled++; origOnRej && origOnRej(e); };
+  const waitFinished = () => new Promise((res) => {
+    let un = () => {};
+    listen("build-event", (ev) => {
+      const e = ev.payload;
+      rep.events[e.type] = (rep.events[e.type]||0)+1;
+      if (e.type === "finished") { un(); res(e.status); }
+    }).then((u) => { un = u; });
+  });
+  try {
+    const parent = await invoke("autotest_wizard_parent");
+    const wait1 = waitFinished(); // register BEFORE create kicks the build
+    // Drive the real wizard UI: fill fields, click through the steps.
+    $("newBtn").click();
+    $("wzName").value = "Wizard World";
+    $("wzParent").value = parent;
+    $("wzNext").click(); // -> size
+    document.querySelectorAll('.wz-step[data-step="1"] .card').forEach(c =>
+      c.classList.toggle("on", c.dataset.v === "2048"));
+    wz.size = 2048;
+    $("wzNext").click(); // -> feel
+    document.querySelectorAll('.wz-step[data-step="2"] .card').forEach(c =>
+      c.classList.toggle("on", c.dataset.v === "mountainous"));
+    wz.feel = "mountainous";
+    $("wzNext").click(); // -> start
+    document.querySelectorAll('.wz-step[data-step="3"] .card').forEach(c =>
+      c.classList.toggle("on", c.dataset.v === "water-first"));
+    wz.start = "water-first";
+    await wizardCreate();           // same call the Create button makes
+    $("wizard").classList.add("hidden");
+    rep.created = true;
+    rep.status_build = await wait1;
+    await refresh();
+    rep.manifest = await invoke("file_exists",
+      { path: parent + "/Wizard World/exports/terrain/manifest.json" });
+    // Land stroke extending the island + Water stroke inland lake —
+    // through the same invoke path the canvas tool uses.
+    const land = [];
+    for (let i=0;i<16;i++){const t=i/16*2*Math.PI;land.push([200+80*Math.cos(t),80*Math.sin(t)]);}
+    await invoke("add_shape", { kind:"land", stroke:land, toleranceM:1.5*mpp() });
+    const water = [];
+    for (let i=0;i<16;i++){const t=i/16*2*Math.PI;water.push([-100+40*Math.cos(t),-100+40*Math.sin(t)]);}
+    await invoke("add_shape", { kind:"water", stroke:water, toleranceM:1.5*mpp() });
+    await refreshShapes();
+    rep.land_shape = shapeList.some(s => s.kind === "land" && s.id !== "coast-1");
+    rep.water_shape = shapeList.some(s => s.kind === "water");
+    // Undo once (removes water shape), Redo (restores it), then rebuild.
+    rep.undo_ok = await invoke("undo");
+    rep.redo_ok = await invoke("redo");
+    rep.status_rebuild = await new Promise((res, rej) => {
+      let un = () => {};
+      listen("build-event", (ev) => {
+        const e = ev.payload;
+        rep.events[e.type] = (rep.events[e.type]||0)+1;
+        if (e.type === "finished") { un(); res(e.status); }
+      }).then((u) => { un = u; invoke("build",{mode:"incremental"}).catch(e=>{un();rej(e);}); });
+    });
+    // world.json keeps both shapes.
+    const ws = JSON.parse(await invoke("shapes"));
+    rep.land_shape = ws.some(s => s.kind === "land" && s.id !== "coast-1");
+    rep.water_shape = ws.some(s => s.kind === "water");
+    await refreshShapes(); refresh();
+    // Tiles render?
+    const ts = tileSize * mpp();
+    const img = tiles.get(`${z}/0/0`) || tiles.get(`${z}/-1/-1`);
+    if (img) {
+      const c2 = document.createElement("canvas"); c2.width=c2.height=tileSize;
+      const cx = c2.getContext("2d"); cx.drawImage(img,0,0);
+      rep.tiles_alpha = cx.getImageData(0,0,tileSize,tileSize).data.filter((_,i)=>i%4===3&&_).length;
+    } else {
+      const cx = $("map").getContext("2d");
+      const d2 = cx.getImageData(0,0,$("map").width,$("map").height).data;
+      let a=0; for (let i=3;i<d2.length;i+=400) if (d2[i]) a++;
+      rep.tiles_alpha = a;
+    }
+  } catch (e) { rep.error = String(e); fwd("error", ["autotestNew failed", e]); }
+  rep.unhandled = unhandled;
+  await invoke("autotest_report", { report: JSON.stringify(rep) });
+}
 async function boot() {
   try {
     fwd("info", ["app.js boot, __TAURI__ keys:", Object.keys(T||{})]);
-    if (await invoke("autotest_mode")) autotest();
+    if (await invoke("autotest_mode")) {
+      if ((await invoke("autotest_wizard_parent")) !== "") autotestNew();
+      else autotest();
+    }
   } catch (e) { fwd("error", ["boot failed", e]); }
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

@@ -145,6 +145,11 @@ must never depend on the other core crates directly.
   apply it at the top level).
 - `scripts/s3-terrain-gate.sh` runs new+build+Godot+Blender checks and
   exits 0 only if both print PASS.
+- `scripts/phase2-exit-gate.sh` is the phase-2 exit gate: release app +
+  `MB_APP_AUTOTEST_NEW` wizard run + fly bench bars. The wizard autotest
+  builds a full project inside the app — use the RELEASE binary
+  (`target/app/release/mb-app`); debug terrain gen is minutes-slow and
+  hits the autotest timeout (900 s in wizard mode, 120 s otherwise).
 - Vertex colors: the glTF spec expects COLOR_0 to feed base color, but
   neither importer does it automatically — `import_world.gd` sets
   `vertex_color_use_as_albedo = true` per StandardMaterial3D, and

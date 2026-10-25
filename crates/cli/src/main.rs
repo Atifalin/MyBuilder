@@ -29,6 +29,15 @@ enum Command {
         /// nondeterministic point in the toolchain.
         #[arg(long)]
         seed: Option<String>,
+        /// World side in meters: 1024, 2048 or 4096.
+        #[arg(long, value_parser = ["1024", "2048", "4096"])]
+        size: Option<String>,
+        /// Terrain feel preset.
+        #[arg(long, value_parser = ["bumpy", "hilly", "mountainous"])]
+        feel: Option<String>,
+        /// Start mode: an island in the sea, or all land.
+        #[arg(long, value_parser = ["water-first", "land-first"])]
+        start: Option<String>,
     },
     /// Validate a project folder and print diagnostics.
     Validate {
@@ -95,7 +104,37 @@ fn parse_seed(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid --seed {s:?}: expected hex, {e}"))
 }
 
-fn cmd_new(dir: &Path, name: Option<String>, seed: Option<String>) -> Result<(), String> {
+fn cmd_new(
+    dir: &Path,
+    name: Option<String>,
+    seed: Option<String>,
+    size: Option<String>,
+    feel: Option<String>,
+    start: Option<String>,
+) -> Result<(), String> {
+    if size.is_some() || feel.is_some() || start.is_some() {
+        // Wizard path: goes through mb_bridge::new_project.
+        let feel = match feel.as_deref().unwrap_or("hilly") {
+            "bumpy" => mb_schema::TerrainFeel::Bumpy,
+            "mountainous" => mb_schema::TerrainFeel::Mountainous,
+            _ => mb_schema::TerrainFeel::Hilly,
+        };
+        let start = match start.as_deref().unwrap_or("land-first") {
+            "water-first" => mb_bridge::WorldStart::WaterFirst,
+            _ => mb_bridge::WorldStart::LandFirst,
+        };
+        let opts = mb_bridge::NewProjectOptions {
+            name: name.unwrap_or_else(|| "My World".to_string()),
+            seed_hex: seed,
+            size_m: size.unwrap_or_else(|| "2048".to_string()).parse().unwrap(),
+            feel,
+            start,
+        };
+        let project = mb_bridge::new_project(dir, &opts).map_err(|e| format!("{e:?}"))?;
+        println!("created project {:?} at {}", project.name, dir.display());
+        println!("seed: {:016x}", project.seed);
+        return Ok(());
+    }
     let seed = match seed {
         Some(s) => parse_seed(&s)?,
         None => gen_seed(),
@@ -412,7 +451,14 @@ fn cmd_probe() -> ExitCode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::New { dir, name, seed } => cmd_new(&dir, name, seed).map(|_| ExitCode::SUCCESS),
+        Command::New {
+            dir,
+            name,
+            seed,
+            size,
+            feel,
+            start,
+        } => cmd_new(&dir, name, seed, size, feel, start).map(|_| ExitCode::SUCCESS),
         Command::Validate { dir, json } => cmd_validate(&dir, json),
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),

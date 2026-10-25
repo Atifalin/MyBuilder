@@ -68,6 +68,93 @@ fn state(state: tauri::State<Shared>) -> Result<String, String> {
     get_state(&g)
 }
 
+/// Wizard: create + open + auto-build a brand-new project.
+#[tauri::command]
+fn new_project(
+    state: tauri::State<Shared>,
+    app: tauri::AppHandle,
+    parent: String,
+    name: String,
+    size_m: f64,
+    feel: String,
+    start: String,
+) -> Result<String, String> {
+    // Same sanitising the JS applies: [A-Za-z0-9 _-], trimmed, non-empty.
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let clean = clean.trim().to_string();
+    if clean.is_empty() {
+        return Err("project name is empty".to_string());
+    }
+    let feel = match feel.as_str() {
+        "bumpy" => mb_schema::TerrainFeel::Bumpy,
+        "hilly" => mb_schema::TerrainFeel::Hilly,
+        "mountainous" => mb_schema::TerrainFeel::Mountainous,
+        _ => return Err(format!("bad feel {feel}")),
+    };
+    let start = match start.as_str() {
+        "water-first" => mb_bridge::WorldStart::WaterFirst,
+        "land-first" => mb_bridge::WorldStart::LandFirst,
+        _ => return Err(format!("bad start {start}")),
+    };
+    let dir = PathBuf::from(&parent).join(&clean);
+    {
+        let mut g = state.inner().lock().map_err(|e| e.to_string())?;
+        if g.as_ref().is_some_and(|p| p.building) {
+            return Err("a build is running".to_string());
+        }
+        mb_bridge::new_project(
+            &dir,
+            &mb_bridge::NewProjectOptions {
+                name: clean,
+                seed_hex: None,
+                size_m,
+                feel,
+                start,
+            },
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        let session = mb_bridge::Session::open(&dir).map_err(|e| format!("{e:?}"))?;
+        *g = Some(Project {
+            autotest: false,
+            dir: dir.clone(),
+            session,
+            preview: None,
+            cancel: None,
+            building: false,
+            dirty: false,
+        });
+        get_state(&g)?
+    };
+    // Auto-start a full build like clear_all does.
+    {
+        let mut g = state.inner().lock().map_err(|e| e.to_string())?;
+        let p = g.as_mut().ok_or("no project open")?;
+        p.building = true;
+        let cancel = mb_bridge::CancelToken::new();
+        p.cancel = Some(cancel.clone());
+        let d = p.dir.clone();
+        let shared = state.inner().clone();
+        drop(g);
+        spawn_build(app, shared, d, BuildMode::Full, None, cancel);
+    }
+    let g = state.inner().lock().map_err(|e| e.to_string())?;
+    get_state(&g)
+}
+
+#[tauri::command]
+fn file_exists(path: String) -> bool {
+    Path::new(&path).exists()
+}
+
 fn apply_edit(state: &Shared, edit: mb_bridge::RecipeEdit) -> Result<String, String> {
     let mut g = state.lock().map_err(|e| e.to_string())?;
     let p = g.as_mut().ok_or("no project open")?;
@@ -320,6 +407,9 @@ fn js_log(level: String, msg: String) {
 
 #[tauri::command]
 fn autotest_mode(state: tauri::State<'_, Shared>) -> bool {
+    if std::env::var("MB_APP_AUTOTEST").is_ok() || std::env::var("MB_APP_AUTOTEST_NEW").is_ok() {
+        return true;
+    }
     state
         .inner()
         .lock()
@@ -327,12 +417,30 @@ fn autotest_mode(state: tauri::State<'_, Shared>) -> bool {
         .unwrap_or(false)
 }
 
+/// Wizard-autotest parent dir ("" when not in that mode).
+#[tauri::command]
+fn autotest_wizard_parent() -> String {
+    std::env::var("MB_APP_AUTOTEST_NEW").unwrap_or_default()
+}
+
 /// Hidden autotest hook: print the report JSON and exit 0/1.
 #[tauri::command]
 fn autotest_report(app: tauri::AppHandle, report: String) -> Result<(), String> {
     println!("AUTOTEST_RESULT {report}");
     let v: serde_json::Value = serde_json::from_str(&report).unwrap_or_default();
-    let ok = v["status1"] == "ok"
+    let ok = if v["wizard"] == true {
+        v["created"] == true
+            && v["status_build"] == "ok"
+            && v["status_rebuild"] == "ok"
+            && v["manifest"] == true
+            && v["land_shape"] == true
+            && v["water_shape"] == true
+            && v["undo_ok"] == true
+            && v["redo_ok"] == true
+            && v["tiles_alpha"].as_i64().unwrap_or(0) > 0
+            && v["unhandled"].as_i64().unwrap_or(9) == 0
+    } else {
+        v["status1"] == "ok"
         && v["status2"] == "ok"
         && v["status3"] == "ok"
         && v["tiles_alpha"].as_i64().unwrap_or(0) > 0
@@ -340,13 +448,15 @@ fn autotest_report(app: tauri::AppHandle, report: String) -> Result<(), String> 
         && v["shapes_after_undo"].as_i64().unwrap_or(-1) == 0
         && v["unhandled"].as_i64().unwrap_or(9) == 0
         && v["can_undo"] == true
-        && v["can_redo"] == true;
+        && v["can_redo"] == true
+    };
     app.exit(if ok { 0 } else { 1 });
     Ok(())
 }
 
 fn main() {
     let autotest = std::env::var("MB_APP_AUTOTEST").ok();
+    let autotest_new = std::env::var("MB_APP_AUTOTEST_NEW").is_ok();
     let shared: Shared = Arc::new(Mutex::new(None));
     let shared2 = shared.clone();
     tauri::Builder::default()
@@ -354,6 +464,8 @@ fn main() {
         .manage(shared)
         .invoke_handler(tauri::generate_handler![
             open_project,
+            new_project,
+            file_exists,
             state,
             set_feel,
             set_octaves,
@@ -365,6 +477,7 @@ fn main() {
             preview_tile,
             autotest_report,
             autotest_mode,
+            autotest_wizard_parent,
             js_log,
             add_shape,
             remove_shape,
@@ -377,12 +490,15 @@ fn main() {
                     std::env::var("MB_APP_AUTOTEST").unwrap_or_default()
                 );
             }
-            let autotest_flag = autotest.is_some();
+            let autotest_flag = autotest.is_some() || autotest_new;
             if autotest_flag {
-                // Hard timeout: never hang silently.
+                // Hard timeout: never hang silently. The wizard path builds a
+                // full project inside the app — in a debug binary the terrain
+                // pipeline takes minutes, so give it more headroom.
+                let secs = if autotest_new { 900 } else { 120 };
                 let h = app.handle().clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(120));
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
                     eprintln!("[autotest] timeout");
                     h.exit(1);
                 });

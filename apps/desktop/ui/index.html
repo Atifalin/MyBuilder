@@ -3,6 +3,7 @@
 <body>
 <header>
   <button id="openBtn">Open project…</button>
+  <button id="newBtn">New project…</button>
   <span id="tools">
     <button class="tool on" data-t="pan">Pan</button>
     <button class="tool" data-t="land">Land</button>
@@ -51,6 +52,47 @@
     <p>This deletes generated outputs and the cache, and picks a new seed.</p>
     <label><input type="checkbox" id="keepOv" checked> Keep manual overrides</label>
     <div class="row"><button id="mCancel">Cancel</button><button id="mConfirm" class="warn">Confirm</button></div>
+  </div>
+</div>
+<div id="wizard" class="hidden">
+  <div class="box">
+    <div class="wz-step" data-step="0">
+      <h4>Name &amp; location</h4>
+      <label>Project name <input id="wzName" value="My World"></label>
+      <label>Parent folder
+        <span class="row"><input id="wzParent" readonly><button id="wzPick">Choose…</button></span>
+      </label>
+    </div>
+    <div class="wz-step hidden" data-step="1">
+      <h4>World size</h4>
+      <div class="cards">
+        <button class="card" data-v="1024">1 km<small>4×4 = 16 chunks</small></button>
+        <button class="card" data-v="2048">2 km<small>8×8 = 64 chunks</small></button>
+        <button class="card" data-v="4096">4 km<small>16×16 = 256 chunks</small></button>
+      </div>
+    </div>
+    <div class="wz-step hidden" data-step="2">
+      <h4>Terrain feel</h4>
+      <div class="cards">
+        <button class="card" data-v="bumpy">Bumpy<small>gentle small-scale bumps</small></button>
+        <button class="card" data-v="hilly">Hilly<small>rolling hills and valleys</small></button>
+        <button class="card" data-v="mountainous">Mountainous<small>big ridged mountain ranges</small></button>
+      </div>
+    </div>
+    <div class="wz-step hidden" data-step="3">
+      <h4>Start</h4>
+      <div class="cards">
+        <button class="card" data-v="water-first">Water first<small>an island in the sea; reshape it with the Land and Water tools</small></button>
+        <button class="card" data-v="land-first">Land first<small>everything is land; carve lakes and coasts with the Water tool</small></button>
+      </div>
+    </div>
+    <div id="wzErr" class="log-err"></div>
+    <div class="row">
+      <button id="wzBack">Back</button>
+      <button id="wzNext">Next</button>
+      <button id="wzCreate" class="hidden">Create</button>
+      <button id="wzCancel">Cancel</button>
+    </div>
   </div>
 </div>
 <script src="app.js"></script>

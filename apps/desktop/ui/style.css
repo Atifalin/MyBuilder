@@ -23,8 +23,17 @@ button:hover { background:#464a53; } button:disabled { opacity:.45; cursor:defau
 #log { flex:1; margin:0; padding:6px 10px; overflow-y:auto; font:11px/1.5 ui-monospace,monospace; white-space:pre-wrap; }
 .log-err { color:#e06c60; } .log-warn { color:#e0af60; } .log-info { color:#7ab8e0; } .log-ok { color:#7ec06a; }
 #clearLog { position:absolute; }
-#modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; }
-#modal .box { background:#26282d; padding:20px; border-radius:8px; width:360px; display:flex; flex-direction:column; gap:12px; }
+#modal, #wizard { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; }
+#modal .box, #wizard .box { background:#26282d; padding:20px; border-radius:8px; width:360px; display:flex; flex-direction:column; gap:12px; }
+#wizard .box { width:460px; }
+.wz-step label { display:flex; flex-direction:column; gap:4px; margin:8px 0; }
+.wz-step input { background:#1c1e22; border:1px solid #4a4d55; color:#ddd; border-radius:6px; padding:5px 8px; flex:1; }
+.cards { display:flex; gap:8px; }
+.card { flex:1; display:flex; flex-direction:column; gap:4px; align-items:flex-start; padding:10px; min-height:64px; }
+.card small { color:#8a8f98; font-weight:400; }
+.card.on { background:#4a9fd8; border-color:#4a9fd8; color:#fff; }
+.card.on small { color:#dde; }
+#wzErr { min-height:1em; font-size:12px; }
 .hidden { display:none !important; }
 
 #tools { display:flex; gap:4px; }

@@ -1024,11 +1024,14 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                 out.extend_from_slice(&png);
             }
             if self.project.generator_version >= 3 {
-                // Water mesh tail: u32 len + GLB (empty vec when the
-                // chunk has no wet nodes). Vertices at the mesh stride;
-                // y = the water surface level — wet nodes' own level,
-                // dry nodes' nearest-wet level so edges don't sag.
-                // Triangles only when all three vertices are wet.
+                // Water mesh tail: u32 len + GLB (empty vec when the chunk
+                // has no wet triangle). Vertices at the mesh stride; a
+                // triangle is emitted when ANY of its three vertices is
+                // wet (river/lake), so rivers narrower than the stride
+                // still surface. A wet vertex uses its own water level;
+                // a dry rim vertex borrows the nearest wet level
+                // (water_surface) clamped down to the terrain height so
+                // the edge tucks under/onto the bank instead of floating.
                 let _no_w = crate::hydrology::NO_WATER;
 
                 let side = cells_per_chunk / step + 1;
@@ -1046,45 +1049,69 @@ impl mb_pipeline::SlicedStage for ChunkStage {
                 let ox = self.grid.x(self.cx * cells_per_chunk);
                 let oz = self.grid.z(self.cz * cells_per_chunk);
                 let mut vidx = vec![u32::MAX; side * side];
-                for vj in 0..side {
-                    for vi in 0..side {
-                        let (gi, gj) = (
-                            self.cx * cells_per_chunk + vi * step,
-                            self.cz * cells_per_chunk + vj * step,
-                        );
-                        if !cs.is_wet(gi, gj) {
-                            continue;
-                        }
-                        let level = cs.water_at(gi, gj);
-                        vidx[vj * side + vi] = wm.positions.len() as u32;
-                        wm.positions.push([
-                            (self.grid.x(gi) - ox) as f32,
-                            level as f32,
-                            (self.grid.z(gj) - oz) as f32,
-                        ]);
-                        wm.normals.push([0.0, 1.0, 0.0]);
-                        wm.uvs
-                            .push([self.grid.x(gi) as f32, self.grid.z(gj) as f32]);
-                        wm.colors.push([0.1, 0.35, 0.65]);
+                let emit_vert = |wm: &mut crate::mesh::ChunkMesh,
+                                 vidx: &mut [u32],
+                                 vi: usize,
+                                 vj: usize,
+                                 side: usize|
+                 -> u32 {
+                    let cur = vidx[vj * side + vi];
+                    if cur != u32::MAX {
+                        return cur;
                     }
-                }
+                    let (gi, gj) = (
+                        self.cx * cells_per_chunk + vi * step,
+                        self.cz * cells_per_chunk + vj * step,
+                    );
+                    let mut level = cs.water_at(gi, gj); // wet level or borrowed
+                    if !cs.is_wet(gi, gj) {
+                        level = level.min(cs.h_at(gi, gj)); // dry: don't float
+                    }
+                    let id = wm.positions.len() as u32;
+                    vidx[vj * side + vi] = id;
+                    wm.positions.push([
+                        (self.grid.x(gi) - ox) as f32,
+                        level as f32,
+                        (self.grid.z(gj) - oz) as f32,
+                    ]);
+                    wm.normals.push([0.0, 1.0, 0.0]);
+                    wm.uvs
+                        .push([self.grid.x(gi) as f32, self.grid.z(gj) as f32]);
+                    wm.colors.push([0.1, 0.35, 0.65]);
+                    id
+                };
+                let wet = |vi: usize, vj: usize| {
+                    cs.is_wet(
+                        self.cx * cells_per_chunk + vi * step,
+                        self.cz * cells_per_chunk + vj * step,
+                    )
+                };
                 for vj in 0..side - 1 {
                     for vi in 0..side - 1 {
-                        let a = vidx[vj * side + vi];
-                        let b = vidx[vj * side + vi + 1];
-                        let c = vidx[(vj + 1) * side + vi];
-                        let d = vidx[(vj + 1) * side + vi + 1];
-                        if a != u32::MAX && c != u32::MAX && b != u32::MAX {
+                        if !(wet(vi, vj)
+                            || wet(vi + 1, vj)
+                            || wet(vi, vj + 1)
+                            || wet(vi + 1, vj + 1))
+                        {
+                            continue;
+                        }
+                        let a = emit_vert(&mut wm, &mut vidx, vi, vj, side);
+                        let b = emit_vert(&mut wm, &mut vidx, vi + 1, vj, side);
+                        let c = emit_vert(&mut wm, &mut vidx, vi, vj + 1, side);
+                        let d = emit_vert(&mut wm, &mut vidx, vi + 1, vj + 1, side);
+                        if wet(vi, vj) || wet(vi, vj + 1) || wet(vi + 1, vj) {
                             wm.indices.extend_from_slice(&[a, c, b]);
                         }
-                        if b != u32::MAX && c != u32::MAX && d != u32::MAX {
+                        if wet(vi + 1, vj) || wet(vi, vj + 1) || wet(vi + 1, vj + 1) {
                             wm.indices.extend_from_slice(&[b, c, d]);
                         }
                     }
                 }
                 wm.vertex_count = wm.positions.len();
                 wm.triangle_count = wm.indices.len() / 3;
-                let wglb = if wm.vertex_count == 0 {
+                // Wet verts with no all-wet triangle produce a GLB with an
+                // empty index accessor; skip the tail entirely in that case.
+                let wglb = if wm.triangle_count == 0 {
                     Vec::new()
                 } else {
                     crate::glb::water_glb(

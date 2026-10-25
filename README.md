@@ -274,6 +274,47 @@ Import a built world (checks object count, world bounds, height range):
 # S3 BLENDER PASS
 ```
 
+## Godot fly demo and bench
+
+`adapters/godot/demo/world_loader.gd` (`WorldLoader.load_world`) is the
+shared chunk/water/splat loader used by `import_world.gd` and the fly demo.
+
+```sh
+# interactive fly camera (WASD/QE, right-button look, Shift boost, wheel speed)
+/Applications/Godot.app/Contents/MacOS/Godot --path adapters/godot/demo \
+    res://fly_world.tscn -- --manifest <project>/exports/terrain/manifest.json
+# deterministic GPU bench: scripts/fly-bench.sh <project dir> [seconds]
+```
+
+Bench mode disables vsync (`--disable-vsync --max-fps 0`), flies a fixed
+circle+coast-pass path, then prints a `BENCH {...}` line. On this Mac the
+window server still paces presents at 100 fps flat even with vsync off, so
+`avg_gpu_ms`/`avg_cpu_ms` (from `viewport_get_measured_render_time_*`) are
+the real cost numbers — note the Metal driver reports GPU time as 0.
+
+## Terrain3D trial
+
+`scripts/fetch-terrain3d.sh` downloads Terrain3D **v1.0.2-stable**
+(stated compatibility Godot 4.4+, loads fine in 4.7.1) into
+`adapters/godot/demo/addons/terrain_3d/` (gitignored). Verified:
+
+```sh
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path adapters/godot/demo \
+    --script res://terrain3d_import.gd -- --layers <project>/layers/layers.json
+# T3D_CHECK ... OK  /  T3D_IMPORT PASS
+```
+
+Findings: `terrain.data` exists only one frame after the node enters the
+tree; `import_images` snaps the position DOWN to the 256 m region grid
+(pixel (i,j) lands at snapped_pos + (i,j)·vertex_spacing — pass
+`origin` snapped to 256 m); `height_terrain3d.r16` is the (nx−1)² cell
+grid and `Terrain3DUtil.load_image` decodes it scaled to [h_min,h_max].
+`get_height` matches our dequantized r16 exactly at sample points.
+`--t3d` on the fly scene runs the same bench path over Terrain3D
+(`BENCH_T3D {...}`; ~414k drawn triangles vs our 524k chunk mesh).
+Gaps: no control/splat map conversion yet (terrain renders untextured),
+water meshes not integrated, `data.get_height` needs `update_maps` first.
+
 ## Rebuilds and the persistent cache (S10)
 
 `mybuilder build` keeps a content-addressed cache in the OS cache dir —

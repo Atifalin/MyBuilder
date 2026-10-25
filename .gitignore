@@ -3,4 +3,5 @@ target/
 __pycache__/
 adapters/godot/demo/bin/
 adapters/godot/demo/.godot/
+adapters/godot/demo/addons/terrain_3d/
 .DS_Store

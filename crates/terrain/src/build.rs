@@ -139,6 +139,9 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                 if let Some(f) = c["splat"]["file"].as_str() {
                     push(format!("exports/terrain/{f}"), f);
                 }
+                if let Some(f) = c["water"]["file"].as_str() {
+                    push(format!("exports/terrain/{f}"), f);
+                }
             }
         }
         if let Some(regs) = v["regions"].as_array() {
@@ -149,6 +152,9 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                             push(format!("exports/terrain/{f}"), f);
                         }
                         if let Some(f) = c["splat"]["file"].as_str() {
+                            push(format!("exports/terrain/{f}"), f);
+                        }
+                        if let Some(f) = c["water"]["file"].as_str() {
                             push(format!("exports/terrain/{f}"), f);
                         }
                     }
@@ -545,7 +551,7 @@ pub fn build_project_observed(
                 world.clone(),
                 cx,
                 cz,
-                1,
+                2, // any-wet water triangles + dry-vert clamping
             )));
         }
     }

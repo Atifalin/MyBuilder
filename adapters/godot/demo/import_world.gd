@@ -40,9 +40,13 @@ func _initialize() -> void:
 	var w: float = manifest["extent"]["width_m"]
 	var d: float = manifest["extent"]["depth_m"]
 
-	var world_root := Node3D.new()
+	# Loading is shared with the fly demo via world_loader.gd; the
+	# per-chunk checks below re-verify what it produced.
+	var loaded_res := WorldLoader.load_world(manifest_path, root)
+	for f in loaded_res["failures"]:
+		failures.append(f)
+	var world_root: Node3D = loaded_res["root"]
 	world_root.name = "S3Terrain"
-	root.add_child(world_root)
 
 	var have_union := false
 	var union := AABB()
@@ -55,34 +59,17 @@ func _initialize() -> void:
 	for reg in manifest.get("regions", []):
 		for c in reg["chunks"]:
 			work.append(c)
-	for c in work:
-		var glb_path := base_dir.path_join(c["file"])
-		var doc := GLTFDocument.new()
-		var state := GLTFState.new()
-		var err := doc.append_from_file(glb_path, state)
-		if err != OK:
-			failures.append("append_from_file failed for %s: %s" % [c["file"], error_string(err)])
-			continue
-		var scene := doc.generate_scene(state)
-		# gen 3: a translucent water surface mesh per chunk that has one.
-		if c.has("water"):
-			var wpath := base_dir.path_join(c["water"]["file"])
-			var wdoc := GLTFDocument.new()
-			var wstate := GLTFState.new()
-			if wdoc.append_from_file(wpath, wstate) == OK:
-				var wscene := wdoc.generate_scene(wstate)
-				var wmat := StandardMaterial3D.new()
-				wmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-				wmat.albedo_color = Color(0.1, 0.35, 0.65, 0.6)
-				wmat.roughness = 0.1
-				wscene.set_meta("water", true)
-				_apply_override(wscene, wmat)
-				world_root.add_child(wscene)
+	# Scenes come back in work order (water meshes appended after their
+	# chunk's scene); match by manifest index.
+	var scenes := _chunk_scenes(world_root, work.size())
+	for ci in work.size():
+		var c: Dictionary = work[ci]
+		if ci >= scenes.size():
+			break
+		var scene: Node = scenes[ci]
 		if gen2 and c.has("splat"):
-			apply_splat(scene, base_dir.path_join(c["splat"]["file"]), shader_path, c["file"], want_tex if not c.has("region") else 0)
-		else:
-			enable_vertex_colors(scene)
-		world_root.add_child(scene)
+			# Headless splat check on the renderer's material.
+			_check_splat(scene, c["file"], want_tex if not c.has("region") else 0)
 		loaded += 1
 		var aabb: AABB = scene.transform * subtree_aabb(scene)
 		if not have_union:
@@ -159,6 +146,34 @@ func apply_splat(node: Node, png_path: String, shader_path: String, file: String
 	for ch in node.get_children():
 		apply_splat(ch, png_path, shader_path, file, want)
 
+# Direct child scenes in chunk-work order, skipping water meshes.
+func _chunk_scenes(root_node: Node, expected: int) -> Array:
+	var out: Array = []
+	for ch in root_node.get_children():
+		if ch.has_meta("mb_water") or ch.has_meta("mb_sea"):
+			continue
+		out.append(ch)
+	return out
+
+# Assert the renderer's active material is the splat ShaderMaterial
+# with a texture of the expected size.
+func _check_splat(node: Node, file: String, want: int) -> void:
+	if node is MeshInstance3D:
+		var mi: MeshInstance3D = node
+		for si in mi.mesh.get_surface_count():
+			var sm := mi.get_active_material(si) as ShaderMaterial
+			if sm == null:
+				splat_failures.append("%s: active material is not ShaderMaterial" % file)
+				continue
+			var t = sm.get_shader_parameter("splat")
+			if t == null or t.get_width() != t.get_height() or (want > 0 and t.get_width() < want):
+				splat_failures.append(
+					"%s: splat %sx%s want >=%s" % [file,
+					0 if t == null else t.get_width(),
+					0 if t == null else t.get_height(), want])
+	for ch in node.get_children():
+		_check_splat(ch, file, want)
+
 func _apply_override(node: Node, mat: Material) -> void:
 	if node is MeshInstance3D:
 		node.material_override = mat
@@ -206,19 +221,7 @@ func render_png(png_path: String, ctx) -> void:
 	var w: float = ctx["w"]
 	var d: float = ctx["d"]
 	var h_max: float = ctx["h_max"]
-	var sea: float = ctx["sea"]
-	# Flat translucent sea plane at sea level.
-	var sea_mesh := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(w, d)
-	sea_mesh.mesh = plane
-	var sea_mat := StandardMaterial3D.new()
-	sea_mat.albedo_color = Color(0.05, 0.25, 0.5, 0.7)
-	sea_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	sea_mat.roughness = 0.15
-	sea_mesh.material_override = sea_mat
-	sea_mesh.position = Vector3(0, sea, 0)
-	root.add_child(sea_mesh)
+	# The translucent sea plane at sea level now comes from WorldLoader.
 	var cam := Camera3D.new()
 	# 45 degrees above the world centre, far enough to see it all.
 	var dist: float = max(w, d) * 1.1

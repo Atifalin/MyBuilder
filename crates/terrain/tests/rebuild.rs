@@ -988,7 +988,7 @@ fn make_project_gen3(dir: &Path) {
     w.hydrology.lake_min_area_m2 = 10.0;
     // The default 512 m noise wavelength is a smooth ramp on this 256 m
     // world; a short wavelength and inland ramp create real depressions.
-    w.terrain.overrides.relief_m = Some(40.0);
+    w.terrain.overrides.relief_m = Some(60.0);
     w.profile.feature_size_m = 64.0;
     w.profile.inland_width_m = 40.0;
     w.detail_regions = vec![DetailRegion {
@@ -1356,10 +1356,21 @@ fn gen3_water_meshes() {
         .collect();
     assert!(!wchunks.is_empty(), "no water chunks in manifest");
     assert!(m["lakes"].is_array());
-    // Every listed water file exists on disk.
+    // Every listed water file exists on disk and has a real mesh
+    // (non-empty position and index accessors — a chunk with wet verts but
+    // no all-wet triangle must not be listed at all).
     for c in &wchunks {
         let f = c["water"]["file"].as_str().unwrap();
-        assert!(d.join("exports/terrain").join(f).exists(), "missing {f}");
+        let p = d.join("exports/terrain").join(f);
+        assert!(p.exists(), "missing {f}");
+        let g = std::fs::read(&p).unwrap();
+        let jl = u32::from_le_bytes(g[12..16].try_into().unwrap()) as usize;
+        let j: serde_json::Value = serde_json::from_slice(&g[20..20 + jl]).unwrap();
+        let accs = j["accessors"].as_array().unwrap();
+        let vcount = accs[0]["count"].as_u64().unwrap();
+        let icount = accs.last().unwrap()["count"].as_u64().unwrap();
+        assert!(vcount > 0, "{f} has 0 vertices");
+        assert!(icount > 0, "{f} has 0 indices");
     }
     // Lake flat: vertices in a water GLB over a lake have ~equal y.
     // Grab the first water GLB and check its JSON min/max accessor.
@@ -1403,6 +1414,7 @@ fn gen3_water_invariants() {
     let layers: serde_json::Value =
         serde_json::from_slice(&std::fs::read(d.join("layers/layers.json")).unwrap()).unwrap();
     let lake = std::fs::read(d.join("layers/lake.u8")).unwrap();
+    let river = std::fs::read(d.join("layers/river.u8")).unwrap();
     let lnx = layers["nx"].as_u64().unwrap() as usize;
     let cell = layers["cell_size_m"].as_f64().unwrap();
     let (lx0, lz0) = (
@@ -1429,7 +1441,8 @@ fn gen3_water_invariants() {
             &std::fs::read(d.join(format!("exports/terrain/chunk_{cx}_{cz}.glb"))).unwrap(),
         );
         // For each water vertex find the terrain vertex with the nearest
-        // x/z and assert water y >= terrain y (water sits on/above bed).
+        // x/z. Wet verts (river/lake node) sit on/above the bed; dry rim
+        // verts are clamped to terrain or a borrowed level, so y <= max.
         for w in &wv {
             let nearest = tv
                 .iter()
@@ -1438,10 +1451,23 @@ fn gen3_water_invariants() {
                         .total_cmp(&((b[0] - w[0]).powi(2) + (b[2] - w[2]).powi(2)))
                 })
                 .unwrap();
-            assert!(
-                w[1] >= nearest[1] - 1e-4,
-                "water vertex below terrain: w={w:?} t={nearest:?}"
+            let origin = c["origin"].as_array().unwrap();
+            let (i, j) = (
+                ((origin[0].as_f64().unwrap() + w[0] as f64 - lx0) / cell).round() as usize,
+                ((origin[2].as_f64().unwrap() + w[2] as f64 - lz0) / cell).round() as usize,
             );
+            let wet = river[j * lnx + i] == 1 || lake[j * lnx + i] == 1;
+            if wet {
+                assert!(
+                    w[1] >= nearest[1] - 1e-4,
+                    "wet water vertex below bed: w={w:?} t={nearest:?}"
+                );
+            } else {
+                assert!(
+                    w[1] <= nearest[1] + 1e-4,
+                    "dry rim vertex floats above terrain: w={w:?} t={nearest:?}"
+                );
+            }
         }
         // Lakes are exactly flat: a water vertex on a lake node sits at one
         // of the lake levels, bit-exact as f32.

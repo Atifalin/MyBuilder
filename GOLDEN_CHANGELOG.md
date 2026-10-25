@@ -61,3 +61,7 @@ that never reached a commit.
 | 2026-10-23 | 3 | terrain/gen3_height_r16 | 9133a4e9467e | b214f503bfd728b231aeb7831ccacfb51dbbcd2e6791399ff194879b2c4e241c | gen-3 test fixture: shorter noise wavelength and lake thresholds so it forms lakes (exercises lake-flatness test) |
 | 2026-10-23 | 3 | terrain/gen3_river_mask | 991cb98d04d7 | 3f671407a8f747d04affae576a1b860e2637d6e17acd1115705d0889ca598c78 | gen-3 test fixture: shorter noise wavelength and lake thresholds so it forms lakes (exercises lake-flatness test) |
 | 2026-10-23 | 3 | terrain/gen3_manifest | 26bca1582052 | 0d48591e72d127a3b3cc3cd77bebec49d32829bfd16f842b2ee81cdb0bfc341f | gen-3 test fixture: shorter noise wavelength and lake thresholds so it forms lakes (exercises lake-flatness test) |
+| 2026-10-25 | 3 | terrain/gen3_height_r16 | b214f503bfd7 | 2c2ee166e8e8d25cff13b3c30953fbfd704268f32ea46760c51c54dd43d0fa4b | skip empty water meshes |
+| 2026-10-25 | 3 | terrain/gen3_river_mask | 3f671407a8f7 | 2a09a8cbd7fbdf8eb315e3242acb2f0391c32b327b830eca3dd517dd5115d5f9 | skip empty water meshes |
+| 2026-10-25 | 3 | terrain/gen3_manifest | 0d48591e72d1 | 5171ce9300040ddf15d655c3482d21f38f1328d4b7ff78bf23d1f9df9648126c | skip empty water meshes |
+| 2026-10-25 | 3 | terrain/gen3_manifest | 5171ce930004 | 67e50cb096b8f05d062a61573d44426c1def937417a3d4fe137b7953757d57b2 | gen-3 water mesh: any-wet triangles, dry rim verts clamped to terrain |

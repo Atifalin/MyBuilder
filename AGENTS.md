@@ -153,3 +153,19 @@ must never depend on the other core crates directly.
   octave lattices draw visible grid lines. mb-geom uses 22.5-degree-rotated
   gradients and a rational rotation R=[[0.6,-0.8],[0.8,0.6]] plus an
   i*(37.719,-91.137) offset per octave — do not "simplify" these.
+- Water GLBs (gen 3): a chunk only gets a water file + manifest entry when
+  it has >= 1 all-wet triangle at mesh stride — wet verts alone can produce
+  a GLB with an empty index accessor, which Godot warns about. Stale
+  cleanup reads the manifest's `water.file` entries.
+- Fly bench: macOS paces windowed presents at a flat ~100 fps even with
+  `--disable-vsync --max-fps 0`, so fps is compositor-bound, not a perf
+  signal; the bench also reports `viewport_get_measured_render_time_cpu`
+  (GPU time returns 0 on the Metal driver). Screenshot capture is done
+  AFTER the timing window — a mid-bench get_image() causes a ~140 ms hitch.
+- Terrain3D trial (v1.0.2-stable, Godot 4.4+, works in 4.7.1): fetched to
+  `adapters/godot/demo/addons/terrain_3d/` (gitignored) by
+  `scripts/fetch-terrain3d.sh`. Gotchas: `terrain.data` only exists one
+  frame after add_child (await process_frame); `import_images` pos is the
+  image corner SNAPPED DOWN to the 256 m region grid; r16 is the (nx-1)^2
+  cell grid; `update_maps` must run before `get_height`; a script error
+  before `quit()` in a --script SceneTree leaves the process running.

@@ -357,6 +357,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mb-house"
+version = "0.1.0"
+dependencies = [
+ "mb-geom",
+ "mb-schema",
+ "mb-seed",
+]
+
+[[package]]
 name = "mb-pipeline"
 version = "0.1.0"
 dependencies = [

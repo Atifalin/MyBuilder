@@ -1757,10 +1757,17 @@ impl mb_pipeline::Stage for HouseStage {
         let mut tris = [0usize; 3];
         for (li, lod) in h.lods.iter().enumerate() {
             tris[li] = lod.prims.iter().map(|p| p.indices.len() / 3).sum();
-            files.push((
-                format!("lod{li}.glb"),
-                mb_house::glb::lod_glb(lod, &self.spec.id, li as u8, h.plaster_rgb),
-            ));
+            let glb = if li == 0 {
+                mb_house::glb::lod0_glb_with_interior(
+                    lod,
+                    &h.interior,
+                    &self.spec.id,
+                    h.plaster_rgb,
+                )
+            } else {
+                mb_house::glb::lod_glb(lod, &self.spec.id, li as u8, h.plaster_rgb)
+            };
+            files.push((format!("lod{li}.glb"), glb));
         }
         let colliders: Vec<serde_json::Value> = h
             .colliders

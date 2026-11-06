@@ -22,135 +22,179 @@ fn f32s(v: &mut Vec<u8>, x: f32) {
 
 /// GLB for one LOD. Deterministic bytes (fixed JSON layout, 4-byte pad).
 pub fn lod_glb(lod: &Lod, house_id: &str, lod_index: u8, plaster_rgb: [f32; 3]) -> Vec<u8> {
+    glb(
+        &[(
+            lod,
+            house_id.to_string(),
+            format!("\"mb_house_id\":\"{house_id}\",\"lod\":{lod_index}"),
+        )],
+        plaster_rgb,
+    )
+}
+
+/// LOD0 GLB with the interior (walls, stairs, fixtures) as a second root
+/// node `<id>_interior`, so engines can cull it by distance. An empty
+/// interior adds no node.
+pub fn lod0_glb_with_interior(
+    lod: &Lod,
+    interior: &Lod,
+    house_id: &str,
+    plaster_rgb: [f32; 3],
+) -> Vec<u8> {
+    let mut nodes = vec![(
+        lod,
+        house_id.to_string(),
+        format!("\"mb_house_id\":\"{house_id}\",\"lod\":0"),
+    )];
+    if interior.prims.iter().any(|p| !p.indices.is_empty()) {
+        nodes.push((
+            interior,
+            format!("{house_id}_interior"),
+            format!("\"mb_house_id\":\"{house_id}\",\"mb_interior\":true"),
+        ));
+    }
+    glb(&nodes, plaster_rgb)
+}
+
+/// One mesh + root node per entry: (lod, node name, extras JSON body).
+fn glb(nodes: &[(&Lod, String, String)], plaster_rgb: [f32; 3]) -> Vec<u8> {
     let mut bin: Vec<u8> = Vec::new();
     let mut accessors = String::new();
     let mut views = String::new();
-    let mut prims_json = String::new();
+    let mut meshes_json = String::new();
     let mut acc_i = 0usize;
     let mut view_i = 0usize;
-    let mut prims_used: Vec<&Prim> = lod.prims.iter().filter(|p| !p.indices.is_empty()).collect();
-    prims_used.sort_by_key(|p| p.mat as usize);
-    for (pi, p) in prims_used.iter().enumerate() {
-        if pi > 0 {
-            prims_json.push(',');
-        }
-        let mut attrs = String::new();
-        // POSITION with min/max
-        let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for v in &p.positions {
-            for k in 0..3 {
-                mn[k] = mn[k].min(v[k]);
-                mx[k] = mx[k].max(v[k]);
+    for (ni, (lod, _, _)) in nodes.iter().enumerate() {
+        let mut prims_json = String::new();
+        let mut prims_used: Vec<&Prim> =
+            lod.prims.iter().filter(|p| !p.indices.is_empty()).collect();
+        prims_used.sort_by_key(|p| p.mat as usize);
+        for (pi, p) in prims_used.iter().enumerate() {
+            if pi > 0 {
+                prims_json.push(',');
             }
-        }
-        let off = bin.len();
-        for v in &p.positions {
-            for c in v {
-                f32s(&mut bin, *c);
+            let mut attrs = String::new();
+            // POSITION with min/max
+            let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for v in &p.positions {
+                for k in 0..3 {
+                    mn[k] = mn[k].min(v[k]);
+                    mx[k] = mx[k].max(v[k]);
+                }
             }
-        }
-        views += &format!(
-            "{} {{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
-            if view_i > 0 { "," } else { "" },
-            p.positions.len() * 12
-        );
-        view_i += 1;
-        attrs += &format!("\"POSITION\":{acc_i}");
-        accessors += &format!(
-            "{} {{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC3\",\"min\":[{},{},{}],\"max\":[{},{},{}]}}",
-            if acc_i > 0 { "," } else { "" },
-            view_i - 1,
-            p.positions.len(),
-            mn[0],
-            mn[1],
-            mn[2],
-            mx[0],
-            mx[1],
-            mx[2]
-        );
-        acc_i += 1;
-        // NORMAL
-        let off = bin.len();
-        for v in &p.normals {
-            for c in v {
-                f32s(&mut bin, *c);
+            let off = bin.len();
+            for v in &p.positions {
+                for c in v {
+                    f32s(&mut bin, *c);
+                }
             }
-        }
-        views += &format!(
-            ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
-            p.normals.len() * 12
-        );
-        view_i += 1;
-        attrs += ",\"NORMAL\":";
-        attrs += &acc_i.to_string();
-        accessors += &format!(
-            ",{{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC3\"}}",
-            view_i - 1,
-            p.normals.len()
-        );
-        acc_i += 1;
-        // TEXCOORD_0
-        let off = bin.len();
-        for v in &p.uvs {
-            for c in v {
-                f32s(&mut bin, *c);
+            views += &format!(
+                "{} {{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
+                if view_i > 0 { "," } else { "" },
+                p.positions.len() * 12
+            );
+            view_i += 1;
+            attrs += &format!("\"POSITION\":{acc_i}");
+            accessors += &format!(
+                "{} {{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC3\",\"min\":[{},{},{}],\"max\":[{},{},{}]}}",
+                if acc_i > 0 { "," } else { "" },
+                view_i - 1,
+                p.positions.len(),
+                mn[0],
+                mn[1],
+                mn[2],
+                mx[0],
+                mx[1],
+                mx[2]
+            );
+            acc_i += 1;
+            // NORMAL
+            let off = bin.len();
+            for v in &p.normals {
+                for c in v {
+                    f32s(&mut bin, *c);
+                }
             }
-        }
-        views += &format!(
-            ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
-            p.uvs.len() * 8
-        );
-        view_i += 1;
-        attrs += ",\"TEXCOORD_0\":";
-        attrs += &acc_i.to_string();
-        accessors += &format!(
-            ",{{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC2\"}}",
-            view_i - 1,
-            p.uvs.len()
-        );
-        acc_i += 1;
-        // COLOR_0 = material colour (VEC3 float)
-        let rgb = mat_rgb(p.mat, plaster_rgb);
-        let off = bin.len();
-        for _ in &p.positions {
-            for c in rgb {
-                f32s(&mut bin, c);
+            views += &format!(
+                ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
+                p.normals.len() * 12
+            );
+            view_i += 1;
+            attrs += ",\"NORMAL\":";
+            attrs += &acc_i.to_string();
+            accessors += &format!(
+                ",{{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC3\"}}",
+                view_i - 1,
+                p.normals.len()
+            );
+            acc_i += 1;
+            // TEXCOORD_0
+            let off = bin.len();
+            for v in &p.uvs {
+                for c in v {
+                    f32s(&mut bin, *c);
+                }
             }
+            views += &format!(
+                ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
+                p.uvs.len() * 8
+            );
+            view_i += 1;
+            attrs += ",\"TEXCOORD_0\":";
+            attrs += &acc_i.to_string();
+            accessors += &format!(
+                ",{{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC2\"}}",
+                view_i - 1,
+                p.uvs.len()
+            );
+            acc_i += 1;
+            // COLOR_0 = material colour (VEC3 float)
+            let rgb = mat_rgb(p.mat, plaster_rgb);
+            let off = bin.len();
+            for _ in &p.positions {
+                for c in rgb {
+                    f32s(&mut bin, c);
+                }
+            }
+            views += &format!(
+                ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
+                p.positions.len() * 12
+            );
+            view_i += 1;
+            attrs += ",\"COLOR_0\":";
+            attrs += &acc_i.to_string();
+            accessors += &format!(
+                ",{{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC3\"}}",
+                view_i - 1,
+                p.positions.len()
+            );
+            acc_i += 1;
+            // indices
+            let off = bin.len();
+            for &i in &p.indices {
+                bin.extend_from_slice(&i.to_le_bytes());
+            }
+            views += &format!(
+                ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
+                p.indices.len() * 4
+            );
+            view_i += 1;
+            accessors += &format!(
+                ",{{\"bufferView\":{},\"componentType\":5125,\"count\":{},\"type\":\"SCALAR\"}}",
+                view_i - 1,
+                p.indices.len()
+            );
+            acc_i += 1;
+            prims_json += &format!(
+                "{{\"attributes\":{{{attrs}}},\"indices\":{},\"material\":{}}}",
+                acc_i - 1,
+                p.mat as usize
+            );
         }
-        views += &format!(
-            ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
-            p.positions.len() * 12
-        );
-        view_i += 1;
-        attrs += ",\"COLOR_0\":";
-        attrs += &acc_i.to_string();
-        accessors += &format!(
-            ",{{\"bufferView\":{},\"componentType\":5126,\"count\":{},\"type\":\"VEC3\"}}",
-            view_i - 1,
-            p.positions.len()
-        );
-        acc_i += 1;
-        // indices
-        let off = bin.len();
-        for &i in &p.indices {
-            bin.extend_from_slice(&i.to_le_bytes());
+        if ni > 0 {
+            meshes_json.push(',');
         }
-        views += &format!(
-            ",{{\"buffer\":0,\"byteOffset\":{off},\"byteLength\":{}}}",
-            p.indices.len() * 4
-        );
-        view_i += 1;
-        accessors += &format!(
-            ",{{\"bufferView\":{},\"componentType\":5125,\"count\":{},\"type\":\"SCALAR\"}}",
-            view_i - 1,
-            p.indices.len()
-        );
-        acc_i += 1;
-        prims_json += &format!(
-            "{{\"attributes\":{{{attrs}}},\"indices\":{},\"material\":{}}}",
-            acc_i - 1,
-            pi
-        );
+        meshes_json += &format!("{{\"primitives\":[{prims_json}]}}");
     }
     let mut mats = String::new();
     for (i, n) in MAT_NAMES.iter().enumerate() {
@@ -177,8 +221,20 @@ pub fn lod_glb(lod: &Lod, house_id: &str, lod_index: u8, plaster_rgb: [f32; 3]) 
         );
     }
     let _ = mats;
+    let scene_nodes = (0..nodes.len())
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let nodes_json = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, (_, name, extras))| {
+            format!("{{\"mesh\":{i},\"name\":\"{name}\",\"extras\":{{{extras}}}}}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let json = format!(
-        "{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"mb-house\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0,\"name\":\"{house_id}\",\"extras\":{{\"mb_house_id\":\"{house_id}\",\"lod\":{lod_index}}}}}],\"meshes\":[{{\"primitives\":[{prims_json}]}}],\"materials\":[{mats2}],\"accessors\":[{accessors}],\"bufferViews\":[{views}],\"buffers\":[{{\"byteLength\":{}}}]}}",
+        "{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"mb-house\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[{scene_nodes}]}}],\"nodes\":[{nodes_json}],\"meshes\":[{meshes_json}],\"materials\":[{mats2}],\"accessors\":[{accessors}],\"bufferViews\":[{views}],\"buffers\":[{{\"byteLength\":{}}}]}}",
         bin.len()
     );
     let mut jbytes = json.into_bytes();

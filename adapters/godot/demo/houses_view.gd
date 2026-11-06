@@ -34,6 +34,10 @@ func _force_lod(k: int) -> void:
 			mi.visible = (i == k)
 			mi.visibility_range_begin = 0.0
 			mi.visibility_range_end = 0.0
+		var ii: MeshInstance3D = h.get_node_or_null("interior")
+		if ii:
+			ii.visible = (k == 0)
+			ii.visibility_range_end = 0.0
 	for mmi in parts.get_children():
 		mmi.visible = mmi.name.ends_with("_lod%d" % k)
 		mmi.visibility_range_begin = 0.0
@@ -43,7 +47,50 @@ func _shot(name: String) -> void:
 	get_root().get_viewport().get_texture().get_image().save_png(out_dir + "/" + name)
 
 func _look(h: Node3D, eye: Vector3, at: Vector3) -> void:
+	_clear_sections()
+	cam.projection = Camera3D.PROJECTION_PERSPECTIVE
+	cam.near = 0.05
 	cam.look_at_from_position(h.global_position + eye, h.global_position + at, Vector3.UP)
+
+# Cut-away: everything above `cut_y` is discarded and back faces seen
+# through the cut are drawn dark, so cut walls read as solid (a 3D plan).
+const CUT_SHADER := """
+shader_type spatial;
+render_mode cull_disabled;
+uniform float cut_y;
+varying vec3 wpos;
+void vertex() { wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }
+void fragment() {
+	if (wpos.y > cut_y) { discard; }
+	ALBEDO = FRONT_FACING ? COLOR.rgb : vec3(0.16, 0.13, 0.11);
+	ROUGHNESS = 0.9;
+}
+"""
+
+func _section(h: Node3D, cut_y: float, dist: float) -> void:
+	_clear_sections()
+	var sh := Shader.new()
+	sh.code = CUT_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	mat.set_shader_parameter("cut_y", h.global_position.y + cut_y)
+	for n in ["lod0", "interior"]:
+		var mi: MeshInstance3D = h.get_node_or_null(n)
+		if mi:
+			mi.material_override = mat
+	parts.visible = false
+	cam.projection = Camera3D.PROJECTION_PERSPECTIVE
+	cam.near = 0.05
+	var at := h.global_position + Vector3(0, cut_y - 1.0, 0)
+	cam.look_at_from_position(at + Vector3(-0.35, 1.0, -0.6).normalized() * dist, at, Vector3.UP)
+
+func _clear_sections() -> void:
+	for h in houses:
+		for n in ["lod0", "interior"]:
+			var mi: MeshInstance3D = h.get_node_or_null(n)
+			if mi:
+				mi.material_override = null
+	parts.visible = true
 
 func _process(_d) -> bool:
 	frame += 1
@@ -111,9 +158,34 @@ func _process(_d) -> bool:
 		_shot("house_jharokha.png")
 		_look(_house("haveli"), Vector3(-14, 22, -14), Vector3(0, 6, 0))
 		return false
+	# Default house: plinth 0.45 m, storeys 3.2 m; cut 1.4 m above a floor.
 	if frame == 13:
 		_shot("house_roof.png")
+		_section(_house("haveli"), 0.45 + 1.4, 30.0)
+		return false
+	if frame == 15:
+		_shot("house_section_haveli_s0.png")
+		_section(_house("haveli"), 0.45 + 3.2 + 1.4, 30.0)
+		return false
+	if frame == 17:
+		_shot("house_section_haveli_s1.png")
+		_section(_house("ell"), 0.45 + 1.4, 22.0)
+		return false
+	if frame == 19:
+		_shot("house_section_ell_s0.png")
+		_section(_house("ell"), 0.45 + 3.2 + 1.4, 22.0)
+		return false
+	if frame == 21:
+		_shot("house_section_ell_s1.png")
+		_look(_house("haveli"), Vector3(-6.5, 2.0, -7.5), Vector3(0, 1.6, 0))
+		return false
+	if frame == 23:
+		_shot("house_interior_haveli.png")
 		var ok := true
+		for h in houses:
+			if h.get_node_or_null("interior") == null:
+				printerr("no interior node on %s" % h.name)
+				ok = false
 		var m2: Dictionary = JSON.parse_string(FileAccess.open(manifest, FileAccess.READ).get_as_text())
 		if houses.size() != m2["houses"].size():
 			printerr("house count mismatch")

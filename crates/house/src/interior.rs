@@ -99,7 +99,7 @@ fn wall_ops(spec: &HouseSpec, seed: u64, storey: u32) -> Vec<Op> {
     let (outer, court) = crate::plan_pub(spec);
     let co = court.as_ref().map(|c| crate::inward_offset_pub(c, -t));
     let mut out = Vec::new();
-    for o in crate::openings(spec, seed) {
+    for o in crate::raw_openings(spec, seed) {
         if o.storey != storey {
             continue;
         }
@@ -794,7 +794,12 @@ impl Ctx<'_> {
             }
             let c = match snap(ideal, lo, hi, ops, |c| !bad(ops, w.ax, c, s0, s1)) {
                 Some(c) => c,
-                None if clash => ideal.clamp(lo, hi),
+                // Windows yield to walls, doors never do.
+                None if clash => {
+                    let doors: Vec<Op> = ops.iter().filter(|o| o.door).copied().collect();
+                    snap(ideal, lo, hi, &doors, |c| !bad(&doors, w.ax, c, s0, s1))
+                        .unwrap_or(ideal.clamp(lo, hi))
+                }
                 None => return Err(i),
             };
             out.push(c);
@@ -1356,4 +1361,266 @@ fn encode(img: &[u8], w: usize, h: usize) -> Vec<u8> {
     wr.write_image_data(img).expect("png data");
     drop(wr);
     out
+}
+
+// ---- 3D: partition walls and stairs (step 3b) ----
+
+const PART_T: i64 = 120;
+const DOOR_H: i64 = 2100;
+/// Arrival platform at the low end of the stair rect on the floor above.
+const PLATFORM: i64 = 900;
+const SLAB: i64 = 200;
+
+/// Stair rect axes: (long side along x, u0, u1, v0, v1).
+fn stair_axes(r: R) -> (bool, i64, i64, i64, i64) {
+    if r[2] - r[0] >= r[3] - r[1] {
+        (true, r[0], r[2], r[1], r[3])
+    } else {
+        (false, r[1], r[3], r[0], r[2])
+    }
+}
+
+fn uvr(ax: bool, u0: i64, u1: i64, v0: i64, v1: i64) -> R {
+    if ax {
+        [u0, v0, u1, v1]
+    } else {
+        [v0, u0, v1, u1]
+    }
+}
+
+/// Floor-slab opening over the stair: the stair rect minus the arrival
+/// platform at its low end.
+pub fn stair_hole(stair: [i64; 4]) -> [i64; 4] {
+    let (ax, u0, u1, v0, v1) = stair_axes(stair);
+    uvr(ax, u0 + PLATFORM, u1, v0, v1)
+}
+
+/// Box in mm with its four sides, plus top/bottom when asked; one collider.
+#[allow(clippy::too_many_arguments)]
+fn add_box(
+    b: &mut crate::Bld,
+    mat: crate::Mat,
+    r: R,
+    y0: i64,
+    y1: i64,
+    top: bool,
+    bottom: bool,
+    cols: &mut Vec<crate::BoxCollider>,
+) {
+    if r[2] <= r[0] || r[3] <= r[1] || y1 <= y0 {
+        return;
+    }
+    let m = crate::m;
+    let (x0, z0, x1, z1) = (m(r[0]), m(r[1]), m(r[2]), m(r[3]));
+    let (ya, yb) = (m(y0), m(y1));
+    b.quad_facing(
+        mat,
+        [[x0, ya, z0], [x1, ya, z0], [x1, yb, z0], [x0, yb, z0]],
+        [0.0, 0.0, -1.0],
+    );
+    b.quad_facing(
+        mat,
+        [[x0, ya, z1], [x1, ya, z1], [x1, yb, z1], [x0, yb, z1]],
+        [0.0, 0.0, 1.0],
+    );
+    b.quad_facing(
+        mat,
+        [[x0, ya, z0], [x0, ya, z1], [x0, yb, z1], [x0, yb, z0]],
+        [-1.0, 0.0, 0.0],
+    );
+    b.quad_facing(
+        mat,
+        [[x1, ya, z0], [x1, ya, z1], [x1, yb, z1], [x1, yb, z0]],
+        [1.0, 0.0, 0.0],
+    );
+    if top {
+        b.quad_facing(
+            mat,
+            [[x0, yb, z0], [x1, yb, z0], [x1, yb, z1], [x0, yb, z1]],
+            [0.0, 1.0, 0.0],
+        );
+    }
+    if bottom {
+        b.quad_facing(
+            mat,
+            [[x0, ya, z0], [x1, ya, z0], [x1, ya, z1], [x0, ya, z1]],
+            [0.0, -1.0, 0.0],
+        );
+    }
+    cols.push(crate::BoxCollider {
+        center: [(x0 + x1) / 2.0, (ya + yb) / 2.0, (z0 + z1) / 2.0],
+        half: [(x1 - x0) / 2.0, (yb - ya) / 2.0, (z1 - z0) / 2.0],
+    });
+}
+
+/// Partition walls (with doorways) on every shared room edge and the
+/// stair flights, into `b`. Returns whether any stair fell back to a
+/// single straight flight.
+pub(crate) fn build_mesh(
+    spec: &HouseSpec,
+    plan: &FloorPlan,
+    b: &mut crate::Bld,
+    cols: &mut Vec<crate::BoxCollider>,
+) -> bool {
+    use crate::Mat;
+    let h = crate::mm(spec.floor_height_m);
+    let mut straight = false;
+    for f in &plan.floors {
+        let y0 = crate::mm(spec.plinth_m + f.storey as f64 * spec.floor_height_m);
+        let ytop = y0 + h - SLAB;
+        for (i, a) in f.rooms.iter().enumerate() {
+            for c in &f.rooms[i + 1..] {
+                let Some(seg) = shared(a.rect, c.rect, 1) else {
+                    continue;
+                };
+                let vert = seg[0][0] == seg[1][0];
+                let (line, s0, s1) = if vert {
+                    (seg[0][0], seg[0][1], seg[1][1])
+                } else {
+                    (seg[0][1], seg[0][0], seg[1][0])
+                };
+                let mut gaps: Vec<(i64, i64)> = f
+                    .doors
+                    .iter()
+                    .filter(|d| (d.a, d.b) == (a.id, c.id) || (d.a, d.b) == (c.id, a.id))
+                    .map(|d| {
+                        let (p, q) = if vert {
+                            (d.seg[0][1], d.seg[1][1])
+                        } else {
+                            (d.seg[0][0], d.seg[1][0])
+                        };
+                        (p.min(q), p.max(q))
+                    })
+                    .collect();
+                gaps.sort();
+                let piece = |lo: i64, hi: i64| -> R {
+                    if vert {
+                        [line - PART_T / 2, lo, line + PART_T / 2, hi]
+                    } else {
+                        [lo, line - PART_T / 2, hi, line + PART_T / 2]
+                    }
+                };
+                let mut cur = s0;
+                for (g0, g1) in gaps {
+                    add_box(
+                        b,
+                        Mat::Plaster,
+                        piece(cur, g0),
+                        y0,
+                        ytop,
+                        false,
+                        false,
+                        cols,
+                    );
+                    add_box(
+                        b,
+                        Mat::Plaster,
+                        piece(g0, g1),
+                        y0 + DOOR_H,
+                        ytop,
+                        false,
+                        true,
+                        cols,
+                    );
+                    cur = g1;
+                }
+                add_box(
+                    b,
+                    Mat::Plaster,
+                    piece(cur, s1),
+                    y0,
+                    ytop,
+                    false,
+                    false,
+                    cols,
+                );
+            }
+        }
+        if let Some(st) = plan.stair
+            && f.storey + 1 < spec.floors
+        {
+            straight |= stair(b, st, y0, h, cols);
+        }
+    }
+    straight
+}
+
+/// Stair from `y0` up `h` inside `st`: a U (two flights and a half
+/// landing at the high end) when it fits, else one straight flight. Both
+/// arrive on the platform at the low end. Returns true for straight.
+fn stair(b: &mut crate::Bld, st: R, y0: i64, h: i64, cols: &mut Vec<crate::BoxCollider>) -> bool {
+    use crate::Mat;
+    let (ax, u0, u1, v0, v1) = stair_axes(st);
+    let n = (h + 179) / 180;
+    let rise = |k: i64| y0 + h * k / n;
+    let (n1, n2) = (n / 2, n - n / 2);
+    let m = n1.max(n2);
+    let run = (u1 - u0 - PLATFORM - 900) / m;
+    if run >= 220 && v1 - v0 >= 1700 {
+        let vm = (v0 + v1) / 2;
+        let ul = u0 + PLATFORM + m * run;
+        for k in 1..=n1 {
+            let a = ul - (n1 - k + 1) * run;
+            add_box(
+                b,
+                Mat::Stone,
+                uvr(ax, a, a + run, v0, vm - 50),
+                y0,
+                rise(k),
+                true,
+                false,
+                cols,
+            );
+        }
+        add_box(
+            b,
+            Mat::Stone,
+            uvr(ax, ul, u1, v0, v1),
+            y0,
+            rise(n1),
+            true,
+            false,
+            cols,
+        );
+        for j in 1..=n2 {
+            let a = ul - j * run;
+            add_box(
+                b,
+                Mat::Stone,
+                uvr(ax, a, a + run, vm + 50, v1),
+                y0,
+                rise(n1 + j),
+                true,
+                false,
+                cols,
+            );
+        }
+        add_box(
+            b,
+            Mat::Plaster,
+            uvr(ax, ul - m * run, ul, vm - 50, vm + 50),
+            y0,
+            y0 + h,
+            true,
+            false,
+            cols,
+        );
+        false
+    } else {
+        let run = (u1 - u0 - PLATFORM) / n;
+        for k in 1..=n {
+            let a = u1 - k * run;
+            add_box(
+                b,
+                Mat::Stone,
+                uvr(ax, a, a + run, v0, v1),
+                y0,
+                rise(k),
+                true,
+                false,
+                cols,
+            );
+        }
+        true
+    }
 }

@@ -339,7 +339,12 @@ fn winding_matches_normals() {
     let mut stats = std::collections::BTreeMap::<String, (u32, u32)>::new();
     for s in sweep() {
         let h = generate(&s, house_seed(1, &s.id));
-        for (li, l) in h.lods.iter().enumerate() {
+        for (li, l) in h
+            .lods
+            .iter()
+            .chain(std::iter::once(&h.interior))
+            .enumerate()
+        {
             for p in &l.prims {
                 for t in p.indices.chunks(3) {
                     let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
@@ -378,6 +383,7 @@ fn parts_budget_and_sharing() {
     use mb_house::parts::build_part;
     let mut keys = std::collections::BTreeSet::new();
     let (mut n_inst, mut max0, mut max1) = (0usize, 0usize, 0usize);
+    let (mut maxi, mut maxc) = (0usize, 0usize);
     for s in sweep() {
         let h = generate(&s, house_seed(1, &s.id));
         let (mut t0, mut t1) = (tris(&h.lods[0]), tris(&h.lods[1]));
@@ -404,6 +410,11 @@ fn parts_budget_and_sharing() {
         }
         max0 = max0.max(t0);
         max1 = max1.max(t1);
+        let ti = tris(&h.interior);
+        maxi = maxi.max(ti);
+        maxc = maxc.max(t0 + ti);
+        assert!(ti <= 12000, "{} interior {ti}", s.id);
+        assert!(t0 + ti <= 20000, "{} LOD0+parts+interior {}", s.id, t0 + ti);
         if t0 > 8000 {
             let mut c = std::collections::BTreeMap::<String, (usize, usize)>::new();
             for i in &h.instances {
@@ -422,8 +433,68 @@ fn parts_budget_and_sharing() {
         assert!(t1 <= 1500, "{} LOD1 with parts {t1}", s.id);
     }
     println!(
-        "parts: {} unique keys over {n_inst} instances; LOD0+parts max {max0}, LOD1+parts max {max1}",
+        "parts: {} unique keys over {n_inst} instances; LOD0+parts max {max0}, LOD1+parts max {max1}; \
+         interior max {maxi}, LOD0+parts+interior max {maxc}",
         keys.len()
     );
     assert!(keys.len() <= 20, "too many unique parts: {}", keys.len());
+}
+
+#[test]
+fn interior_stairs_bounds_and_glb_node() {
+    use mb_house::interior::layout;
+    let mut stairs = 0;
+    for s in sweep() {
+        let seed = house_seed(1, &s.id);
+        let h = generate(&s, seed);
+        let plan = layout(&s, seed);
+        let (lo, hi) = h.bounds;
+        for p in &h.interior.prims {
+            for v in &p.positions {
+                for k in 0..3 {
+                    assert!(
+                        v[k] >= lo[k] - 0.001 && v[k] <= hi[k] + 0.001,
+                        "{} interior {v:?} outside",
+                        s.id
+                    );
+                }
+            }
+        }
+        if let Some(st) = plan.stair {
+            let r = st.map(|v| v as f32 / 1000.0);
+            for f in 1..s.floors {
+                let y =
+                    ((s.plinth_m + f as f64 * s.floor_height_m) * 1000.0).round() as f32 / 1000.0;
+                let top = h
+                    .interior
+                    .prims
+                    .iter()
+                    .filter(|p| p.mat == mb_house::Mat::Stone)
+                    .any(|p| {
+                        p.positions.iter().zip(&p.normals).any(|(v, n)| {
+                            n[1] > 0.5
+                                && (v[1] - y).abs() <= 0.001
+                                && v[0] >= r[0] - 0.001
+                                && v[0] <= r[2] + 0.001
+                                && v[2] >= r[1] - 0.001
+                                && v[2] <= r[3] + 0.001
+                        })
+                    });
+                assert!(top, "{} stair does not reach storey {f}", s.id);
+                stairs += 1;
+            }
+        }
+        let glb =
+            mb_house::glb::lod0_glb_with_interior(&h.lods[0], &h.interior, &s.id, h.plaster_rgb);
+        let json = String::from_utf8_lossy(
+            &glb[20..20 + u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize],
+        )
+        .to_string();
+        assert!(
+            json.contains("\"mb_interior\":true"),
+            "{} no interior node",
+            s.id
+        );
+    }
+    assert!(stairs > 0);
 }

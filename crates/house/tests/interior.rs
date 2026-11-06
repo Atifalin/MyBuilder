@@ -497,17 +497,14 @@ fn pier_rule() {
     println!(
         "pier clashes: chosen cuts {chosen} (rect/L/court {by_kind:?}), footprint-fixed wing corners {fixed}, of {ends} wall ends on facades"
     );
-    // Where windows on both facades of a wing leave no pier at all, a cut
-    // stays put; step 3b drops facade windows that interior walls hit.
-    assert!(
-        chosen * 100 <= ends * 3,
-        "too many interior walls ending inside openings"
-    );
+    // Windows give way to interior walls, so no wall may end in one.
+    assert_eq!(chosen + fixed, 0, "interior walls ending inside openings");
 }
 
 #[test]
 fn light_stacking_and_determinism() {
     let (mut lit, mut hab) = (0usize, 0usize);
+    let mut windowed = 0usize;
     let (mut stacked, mut uppers) = (0usize, 0usize);
     let (mut kw, mut grounds) = (0usize, 0usize);
     let mut differ = 0;
@@ -530,9 +527,19 @@ fn light_stacking_and_determinism() {
             .map(|r| r.rect)
             .collect();
         for f in &p1.floors {
+            let os = ops(&s, seed, f.storey);
             for r in &f.rooms {
                 if matches!(r.kind, RoomKind::Living | RoomKind::Bedroom) {
                     hab += 1;
+                    let [x0, z0, x1, z1] = r.rect;
+                    let has = os.iter().any(|&(h, l, lo, hi, _)| {
+                        if h {
+                            (l == z0 || l == z1) && lo >= x0 && hi <= x1
+                        } else {
+                            (l == x0 || l == x1) && lo >= z0 && hi <= z1
+                        }
+                    });
+                    windowed += has as usize;
                     if g.lit(r.rect) >= 1000 {
                         lit += 1;
                     } else {
@@ -573,7 +580,7 @@ fn light_stacking_and_determinism() {
         }
     }
     println!(
-        "light: living+bedroom {lit}/{hab}; washroom stacked over ground {stacked}/{uppers}; \
+        "light: living+bedroom {lit}/{hab}, with a window or door {windowed}/{hab}; washroom stacked over ground {stacked}/{uppers}; \
          kitchen next to washroom {kw}/{grounds}; id changes plan {differ}"
     );
     assert_eq!(
@@ -581,6 +588,10 @@ fn light_stacking_and_determinism() {
         "every living room and bedroom needs an exterior wall"
     );
     assert!(differ > 0, "house id never changes the plan");
+    assert!(
+        windowed * 100 >= hab * 90,
+        "rooms without a window: {windowed}/{hab}"
+    );
 }
 
 #[test]

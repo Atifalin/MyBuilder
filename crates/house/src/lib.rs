@@ -13,7 +13,7 @@ pub mod glb;
 pub mod interior;
 pub mod parts;
 
-pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 2;
+pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 3;
 
 pub fn house_seed(project_seed: u64, id: &str) -> u64 {
     mb_seed::derive_path(project_seed, &[("house", id)])
@@ -75,6 +75,8 @@ pub struct HouseMesh {
     /// Instanced part placements (Phase 3 step 2).
     pub instances: Vec<parts::PartInstance>,
     pub lods: [Lod; 3],
+    /// Partition walls, stairs and fixtures: LOD0 only, its own GLB node.
+    pub interior: Lod,
     pub colliders: Vec<BoxCollider>,
     pub plaster_rgb: [f32; 3],
     pub bounds: ([f32; 3], [f32; 3]),
@@ -343,9 +345,18 @@ fn storey_pieces(
     kw: f64,
     spec: &HouseSpec,
     infos: &mut Vec<OpeningInfo>,
+    blocked: &[P2],
 ) -> Vec<Piece> {
     let t = mm(spec.wall_thickness_m);
     let _ = t;
+    let first = infos.len();
+    let on = |p: P2, s: P2, e: P2| {
+        if s[1] == e[1] {
+            p[1] == s[1] && p[0] >= s[0].min(e[0]) && p[0] <= s[0].max(e[0])
+        } else {
+            p[0] == s[0] && p[1] >= s[1].min(e[1]) && p[1] <= s[1].max(e[1])
+        }
+    };
     let n = outer.len();
     let seg = [2usize, 4, 4][spec.complexity.min(2) as usize];
     let mut pieces = Vec::new();
@@ -370,6 +381,13 @@ fn storey_pieces(
             (b[1] - a[1]) as f64 / len as f64,
         );
         let nrm = edge_normal(a, b);
+        // Interior walls meeting this piece (on its room-side face);
+        // windows give way to them.
+        let walls: Vec<i64> = blocked
+            .iter()
+            .filter(|p| on(**p, a, b) || on(**p, ia, ib))
+            .map(|p| ((p[0] - a[0]) as f64 * dir.0 + (p[1] - a[1]) as f64 * dir.1).round() as i64)
+            .collect();
         let mut pc = Piece {
             a,
             b,
@@ -391,6 +409,12 @@ fn storey_pieces(
             for bi in 0..nbays {
                 let u0 = mm(0.6) + bi * bay + (bay - w) / 2;
                 if u0 < mm(0.6) || u0 + w > len - mm(0.6) {
+                    continue;
+                }
+                if walls
+                    .iter()
+                    .any(|&u| u > u0 - mm(0.1) && u < u0 + w + mm(0.1))
+                {
                     continue;
                 }
                 pc.openings.push((
@@ -429,7 +453,13 @@ fn storey_pieces(
                 );
                 clear(a, b)
             });
-            infos.retain(|o| !(o.piece == front_i && o.storey == 0 && !clear(mm(o.u0), mm(o.u1))));
+            // Only this ring's entries: the outer and court rings share
+            // piece indices.
+            let mine: Vec<OpeningInfo> = infos
+                .drain(first..)
+                .filter(|o| !(o.piece == front_i && o.storey == 0 && !clear(mm(o.u0), mm(o.u1))))
+                .collect();
+            infos.extend(mine);
             pc.openings
                 .push((opening_poly(u0, 0, dw, dh, true, seg), "door"));
             infos.push(OpeningInfo {
@@ -564,19 +594,18 @@ fn reveals(b: &mut Bld, poly: &[P2], a: P2, dir: (f64, f64), y0: i64, nxz: (f64,
 fn slab(
     b: &mut Bld,
     outer: &[P2],
-    hole: Option<&Vec<P2>>,
+    holes: &[Vec<P2>],
     y_top: i64,
     thick: i64,
     top_mat: Mat,
     colliders: &mut Vec<BoxCollider>,
     box_rects: &[(i64, i64, i64, i64)],
 ) {
-    let holes: Vec<Vec<P2>> = hole.map(|h| vec![h.clone()]).unwrap_or_default();
-    if let Ok(tris) = mb_geom::triangulate_with_holes(outer, &holes) {
+    if let Ok(tris) = mb_geom::triangulate_with_holes(outer, holes) {
         let pr_top = &mut b.prims[top_mat as usize];
         let base = pr_top.positions.len() as u32;
         let mut all = outer.to_vec();
-        for h in &holes {
+        for h in holes {
             all.extend_from_slice(h);
         }
         for p in &all {
@@ -617,7 +646,7 @@ fn slab(
                 false,
             );
         }
-        if let Some(h) = hole {
+        for h in holes {
             for i in 0..h.len() {
                 let (p, q) = (h[(i + 1) % h.len()], h[i]);
                 let (nx, nz) = edge_normal(p, q);
@@ -648,6 +677,24 @@ fn slab(
             ],
         });
     }
+}
+
+/// `r` minus `cut` as up to four rects (x0, z0, x1, z1).
+fn rect_diff(r: (i64, i64, i64, i64), cut: (i64, i64, i64, i64)) -> Vec<(i64, i64, i64, i64)> {
+    let (x0, z0, x1, z1) = r;
+    let (cx0, cz0, cx1, cz1) = (cut.0.max(x0), cut.1.max(z0), cut.2.min(x1), cut.3.min(z1));
+    if cx0 >= cx1 || cz0 >= cz1 {
+        return vec![r];
+    }
+    [
+        (x0, z0, x1, cz0),
+        (x0, cz1, x1, z1),
+        (x0, cz0, cx0, cz1),
+        (cx1, cz0, x1, cz1),
+    ]
+    .into_iter()
+    .filter(|q| q.0 < q.2 && q.1 < q.3)
+    .collect()
 }
 
 /// Decompose plan into axis-aligned rects for colliders.
@@ -715,12 +762,25 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
 
     let mut lod = [Bld::new(), Bld::new(), Bld::new()];
     let mut colliders: Vec<BoxCollider> = Vec::new();
+    let plan = interior::layout(spec, seed);
+    let blocked = wall_ends_of(spec, &plan);
+    let mut inner_b = Bld::new();
+    interior::build_mesh(spec, &plan, &mut inner_b, &mut colliders);
 
     for s in 0..floors {
         let y0 = mm(plinth + s as f64 * fh);
         let h = mm(fh);
         let pieces = storey_pieces(
-            &outer, &inner, front, s, &mut rng, pitch, kw, spec, &mut infos,
+            &outer,
+            &inner,
+            front,
+            s,
+            &mut rng,
+            pitch,
+            kw,
+            spec,
+            &mut infos,
+            &blocked[s as usize],
         );
         for (i, pc) in pieces.iter().enumerate() {
             let nrm3 = [pc.nrm.0 as f32, 0.0, pc.nrm.1 as f32];
@@ -874,7 +934,18 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
         // piece, `c` (court side) the inner one.
         if court.is_some() {
             if let (Some(c), Some(co)) = (&court, &court_out) {
-                let pieces = storey_pieces(co, c, front, s, &mut rng, pitch, kw, spec, &mut infos);
+                let pieces = storey_pieces(
+                    co,
+                    c,
+                    front,
+                    s,
+                    &mut rng,
+                    pitch,
+                    kw,
+                    spec,
+                    &mut infos,
+                    &blocked[s as usize],
+                );
                 for pc in &pieces {
                     // pc.nrm points away from the court, into the rooms; the face on
                     // `co` faces the rooms, the face on `c` faces the court.
@@ -954,20 +1025,30 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
         }
         // slab at storey floor (s>0) — ground floor is plinth top
         if s > 0 {
+            let mut holes: Vec<Vec<P2>> = court.iter().cloned().collect();
+            let mut rects = plan_rects(&outer, court.as_ref(), spec);
+            if let Some(st) = plan.stair {
+                let [x0, z0, x1, z1] = interior::stair_hole(st);
+                holes.push(vec![[x0, z0], [x1, z0], [x1, z1], [x0, z1]]);
+                rects = rects
+                    .into_iter()
+                    .flat_map(|r| rect_diff(r, (x0, z0, x1, z1)))
+                    .collect();
+            }
             slab(
                 &mut lod[0],
                 &outer,
-                court.as_ref(),
+                &holes,
                 y0,
                 mm(0.2),
                 Mat::Floor,
                 &mut colliders,
-                &plan_rects(&outer, court.as_ref(), spec),
+                &rects,
             );
             slab(
                 &mut lod[1],
                 &outer,
-                court.as_ref(),
+                &holes,
                 y0,
                 mm(0.2),
                 Mat::Floor,
@@ -1051,10 +1132,11 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
 
     // roof slab at top
     let yr = mm(plinth + floors as f64 * fh);
+    let court_holes: Vec<Vec<P2>> = court.iter().cloned().collect();
     slab(
         &mut lod[0],
         &outer,
-        court.as_ref(),
+        &court_holes,
         yr,
         mm(0.2),
         Mat::Roof,
@@ -1064,7 +1146,7 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
     slab(
         &mut lod[1],
         &outer,
-        court.as_ref(),
+        &court_holes,
         yr,
         mm(0.2),
         Mat::Roof,
@@ -1431,6 +1513,9 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
             Lod { prims: prims(b1) },
             Lod { prims: prims(b2) },
         ],
+        interior: Lod {
+            prims: prims(inner_b),
+        },
         instances,
         colliders,
         plaster_rgb,
@@ -1459,8 +1544,35 @@ pub(crate) fn orient_to_normals(mut p: Prim) -> Prim {
     p
 }
 
-/// Debug: openings with their piece/u-v spans (for tests).
+/// Facade openings with their piece/u-v spans, as built: windows that an
+/// interior wall would hit are left out.
 pub fn openings(spec: &HouseSpec, seed: u64) -> Vec<OpeningInfo> {
+    facade(spec, seed, &wall_ends(spec, seed))
+}
+
+/// The facade before it yields to interior walls (the interior layout
+/// is planned against this).
+pub(crate) fn raw_openings(spec: &HouseSpec, seed: u64) -> Vec<OpeningInfo> {
+    facade(spec, seed, &vec![Vec::new(); spec.floors.max(1) as usize])
+}
+
+/// Per storey, the points where interior walls meet a wall face.
+fn wall_ends(spec: &HouseSpec, seed: u64) -> Vec<Vec<P2>> {
+    wall_ends_of(spec, &interior::layout(spec, seed))
+}
+
+fn wall_ends_of(spec: &HouseSpec, plan: &interior::FloorPlan) -> Vec<Vec<P2>> {
+    let mut out = vec![Vec::new(); spec.floors.max(1) as usize];
+    for f in &plan.floors {
+        for r in &f.rooms {
+            let [x0, z0, x1, z1] = r.rect;
+            out[f.storey as usize].extend([[x0, z0], [x1, z0], [x0, z1], [x1, z1]]);
+        }
+    }
+    out
+}
+
+fn facade(spec: &HouseSpec, seed: u64, blocked: &[Vec<P2>]) -> Vec<OpeningInfo> {
     let mut rng = mb_seed::Rng::new(seed);
     let pitch = 3.0 * (1.0 + rng.range_f64(-0.1, 0.1));
     let kw = rng.range_f64(0.35, 0.5);
@@ -1474,12 +1586,32 @@ pub fn openings(spec: &HouseSpec, seed: u64) -> Vec<OpeningInfo> {
     let front = side_dir(spec.front);
     for s in 0..spec.floors {
         let _ = storey_pieces(
-            &outer, &inner, front, s, &mut rng, pitch, kw, spec, &mut infos,
+            &outer,
+            &inner,
+            front,
+            s,
+            &mut rng,
+            pitch,
+            kw,
+            spec,
+            &mut infos,
+            &blocked[s as usize],
         );
         if spec.complexity >= 1 {
             if let (Some(c), Some(co)) = (&court, &court_out) {
                 let n0 = infos.len();
-                let _ = storey_pieces(co, c, front, s, &mut rng, pitch, kw, spec, &mut infos);
+                let _ = storey_pieces(
+                    co,
+                    c,
+                    front,
+                    s,
+                    &mut rng,
+                    pitch,
+                    kw,
+                    spec,
+                    &mut infos,
+                    &blocked[s as usize],
+                );
                 for o in &mut infos[n0..] {
                     o.court = true;
                 }
@@ -1492,6 +1624,32 @@ pub fn openings(spec: &HouseSpec, seed: u64) -> Vec<OpeningInfo> {
 #[cfg(test)]
 mod arch_tests {
     use super::*;
+
+    #[test]
+    fn rect_diff_covers_exactly() {
+        let a = |r: &(i64, i64, i64, i64)| (r.2 - r.0) * (r.3 - r.1);
+        let r = (0, 0, 100, 80);
+        for cut in [
+            (10, 10, 40, 30),
+            (-5, -5, 20, 90),
+            (90, 70, 200, 200),
+            (200, 0, 300, 10),
+            (0, 0, 100, 80),
+        ] {
+            let d = rect_diff(r, cut);
+            let (cx0, cz0, cx1, cz1) = (cut.0.max(0), cut.1.max(0), cut.2.min(100), cut.3.min(80));
+            let ov = ((cx1 - cx0).max(0)) * ((cz1 - cz0).max(0));
+            assert_eq!(d.iter().map(a).sum::<i64>(), a(&r) - ov, "{cut:?}");
+            for (i, p) in d.iter().enumerate() {
+                for q in &d[i + 1..] {
+                    assert!(
+                        !(p.0 < q.2 && q.0 < p.2 && p.1 < q.3 && q.1 < p.3),
+                        "overlap"
+                    );
+                }
+            }
+        }
+    }
 
     fn area2(p: &[P2]) -> i128 {
         (0..p.len())

@@ -50,6 +50,18 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 			mi.visibility_range_end_margin = 5.0
 			mi.name = "lod%d" % li
 			node.add_child(mi)
+			# Interior (walls, stairs) rides in LOD0 as its own node; cull it
+			# early since it only shows through openings up close.
+			var inner := _find_suffix(sc, "_interior")
+			if li == 0 and inner != null:
+				var ii := MeshInstance3D.new()
+				ii.mesh = inner.mesh
+				ii.visibility_range_end = 40.0
+				ii.visibility_range_end_margin = 5.0
+				ii.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+				ii.name = "interior"
+				node.add_child(ii)
+			sc.free()
 		var body := StaticBody3D.new()
 		for c in h.get("colliders", []):
 			var sh := CollisionShape3D.new()
@@ -108,8 +120,17 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 			out["part_instances"][k] = xs.size()
 	return out
 
+static func _find_suffix(n: Node, suffix: String) -> MeshInstance3D:
+	if n is MeshInstance3D and String(n.name).ends_with(suffix):
+		return n
+	for c in n.get_children():
+		var m := _find_suffix(c, suffix)
+		if m:
+			return m
+	return null
+
 static func _first_mesh(n: Node) -> Mesh:
-	if n is MeshInstance3D:
+	if n is MeshInstance3D and not String(n.name).ends_with("_interior"):
 		return n.mesh
 	for c in n.get_children():
 		var m := _first_mesh(c)

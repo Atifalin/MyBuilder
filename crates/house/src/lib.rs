@@ -10,6 +10,7 @@
 use mb_schema::{Footprint, HouseSpec, Side};
 
 pub mod glb;
+pub mod interior;
 pub mod parts;
 
 pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 2;
@@ -88,6 +89,9 @@ pub struct OpeningInfo {
     pub v1: f64,
     pub kind: &'static str, // "window" | "door"
     pub arch: bool,
+    /// true: `piece` indexes the courtyard wall ring (its room-side face);
+    /// false: the outer footprint polygon.
+    pub court: bool,
 }
 
 // ---- unit-circle literal tables (no runtime trig) ----
@@ -207,6 +211,15 @@ fn inward_offset(poly: &[P2], t: i64) -> Vec<P2> {
         out.push([b[0] + n1x + n2x, b[1] + n1z + n2z]);
     }
     out
+}
+
+/// Re-export for interior.rs (plan polygons in mm).
+pub(crate) fn plan_pub(spec: &HouseSpec) -> (Vec<P2>, Option<Vec<P2>>) {
+    plan(spec)
+}
+/// Re-export for interior.rs.
+pub(crate) fn inward_offset_pub(poly: &[P2], t: i64) -> Vec<P2> {
+    inward_offset(poly, t)
 }
 
 fn plan(spec: &HouseSpec) -> (Vec<P2>, Option<Vec<P2>>) {
@@ -393,6 +406,7 @@ fn storey_pieces(
                     v1: 2.4,
                     kind: "window",
                     arch: spec.complexity >= 1,
+                    court: false,
                 });
             }
         }
@@ -427,6 +441,7 @@ fn storey_pieces(
                 v1: 2.6,
                 kind: "door",
                 arch: true,
+                court: false,
             });
         }
     }
@@ -1463,7 +1478,11 @@ pub fn openings(spec: &HouseSpec, seed: u64) -> Vec<OpeningInfo> {
         );
         if spec.complexity >= 1 {
             if let (Some(c), Some(co)) = (&court, &court_out) {
+                let n0 = infos.len();
                 let _ = storey_pieces(co, c, front, s, &mut rng, pitch, kw, spec, &mut infos);
+                for o in &mut infos[n0..] {
+                    o.court = true;
+                }
             }
         }
     }

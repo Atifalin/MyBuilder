@@ -8,3 +8,4 @@ publish.workspace = true
 mb-seed.workspace = true
 mb-geom.workspace = true
 mb-schema.workspace = true
+png.workspace = true

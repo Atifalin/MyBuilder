@@ -14,6 +14,7 @@ fn spec(id: &str, fp: Footprint, floors: u32, cx: u8) -> HouseSpec {
         roof: Roof::default(),
         complexity: cx,
         placement: None,
+        luxuries: Vec::new(),
     }
 }
 

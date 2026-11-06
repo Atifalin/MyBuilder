@@ -1362,6 +1362,8 @@ pub struct HouseSpec {
     pub complexity: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<Placement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub luxuries: Vec<Luxury>,
 }
 fn def_floor_h() -> f64 {
     3.2
@@ -1374,6 +1376,17 @@ fn def_plinth() -> f64 {
 }
 fn one_u8() -> u8 {
     1
+}
+
+/// Optional fixtures/rooms a house can have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Luxury {
+    Ac,
+    Tv,
+    WashingMachine,
+    Jhoola,
+    PoojaCorner,
 }
 
 /// Footprint shapes; all corners are right angles.
@@ -1396,6 +1409,34 @@ pub enum Footprint {
         court_w: f64,
         court_d: f64,
     },
+}
+
+impl Footprint {
+    /// Outer width (x extent).
+    pub fn width(&self) -> f64 {
+        match *self {
+            Footprint::Rect { w, .. } | Footprint::L { w, .. } | Footprint::Courtyard { w, .. } => {
+                w
+            }
+        }
+    }
+    /// Outer depth (z extent).
+    pub fn depth(&self) -> f64 {
+        match *self {
+            Footprint::Rect { d, .. } | Footprint::L { d, .. } | Footprint::Courtyard { d, .. } => {
+                d
+            }
+        }
+    }
+    /// Court rectangle (w,d) if a courtyard footprint.
+    pub fn court(&self) -> Option<(f64, f64)> {
+        match *self {
+            Footprint::Courtyard {
+                court_w, court_d, ..
+            } => Some((court_w, court_d)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1557,6 +1598,17 @@ pub fn validate_houses(recipe: &HouseRecipe) -> Vec<Diagnostic> {
                 format!("{path}/placement"),
                 "placement x/z must be finite and rot_quarter 0..=3".to_string(),
             )));
+        }
+        {
+            let mut lx: Vec<u8> = h.luxuries.iter().map(|l| *l as u8).collect();
+            lx.sort_unstable();
+            if lx.windows(2).any(|w| w[0] == w[1]) {
+                out.push(ent(Diagnostic::error(
+                    "house.luxuries.duplicate",
+                    format!("{path}/luxuries"),
+                    "luxuries must not repeat".to_string(),
+                )));
+            }
         }
     }
     out

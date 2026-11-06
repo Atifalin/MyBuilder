@@ -50,6 +50,7 @@ fn mkproj(dir: &Path) {
                 roof: Roof::default(),
                 complexity: 1,
                 placement: None,
+                luxuries: Vec::new(),
             },
             HouseSpec {
                 id: "ell".into(),
@@ -67,6 +68,7 @@ fn mkproj(dir: &Path) {
                 roof: Roof::default(),
                 complexity: 2,
                 placement: None,
+                luxuries: Vec::new(),
             },
             HouseSpec {
                 id: "court".into(),
@@ -84,6 +86,7 @@ fn mkproj(dir: &Path) {
                 roof: Roof::default(),
                 complexity: 1,
                 placement: None,
+                luxuries: Vec::new(),
             },
         ],
     };

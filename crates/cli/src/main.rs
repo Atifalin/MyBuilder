@@ -110,6 +110,7 @@ fn parse_seed(s: &str) -> Result<u64, String> {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum HouseCmd {
     /// Add a house spec to recipes/houses.json.
     Add {
@@ -136,6 +137,9 @@ enum HouseCmd {
         complexity: Option<u8>,
         #[arg(long, value_parser = ["s", "n", "e", "w"])]
         front: Option<String>,
+        /// Comma-separated luxuries: ac,tv,washing_machine,jhoola,pooja_corner
+        #[arg(long)]
+        luxuries: Option<String>,
     },
     /// List houses in the project.
     List { dir: PathBuf },
@@ -218,6 +222,7 @@ fn cmd_house_add(
     floors: u32,
     complexity: u8,
     front: &str,
+    luxuries: Option<&str>,
 ) -> Result<ExitCode, String> {
     use mb_schema::*;
     let pj_path = dir.join("project.json");
@@ -263,6 +268,23 @@ fn cmd_house_add(
         "w" => Side::W,
         _ => Side::S,
     };
+    let lux = match luxuries {
+        None => Vec::new(),
+        Some(ls) => {
+            let mut v = Vec::new();
+            for t in ls.split(',') {
+                v.push(match t.trim() {
+                    "ac" => Luxury::Ac,
+                    "tv" => Luxury::Tv,
+                    "washing_machine" => Luxury::WashingMachine,
+                    "jhoola" => Luxury::Jhoola,
+                    "pooja_corner" => Luxury::PoojaCorner,
+                    other => return Err(format!("unknown luxury {other:?}")),
+                });
+            }
+            v
+        }
+    };
     recipe.houses.push(HouseSpec {
         id,
         footprint: fp,
@@ -274,6 +296,7 @@ fn cmd_house_add(
         roof: Roof::default(),
         complexity,
         placement: None,
+        luxuries: lux,
     });
     let diags = validate_houses(&recipe);
     let errors: Vec<_> = diags
@@ -628,6 +651,7 @@ fn main() -> ExitCode {
                 floors,
                 complexity,
                 front,
+                luxuries,
             } => cmd_house_add(
                 &dir,
                 id,
@@ -641,6 +665,7 @@ fn main() -> ExitCode {
                 floors.unwrap_or(2),
                 complexity.unwrap_or(1),
                 front.as_deref().unwrap_or("s"),
+                luxuries.as_deref(),
             ),
             HouseCmd::List { dir } => cmd_house_list(&dir),
         },

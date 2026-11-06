@@ -363,6 +363,7 @@ dependencies = [
  "mb-geom",
  "mb-schema",
  "mb-seed",
+ "png",
 ]
 
 [[package]]

@@ -225,8 +225,15 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
             for h in ps {
                 for k in ["lod0", "lod1"] {
                     if let Some(f) = h["files"][k].as_str() {
-                        push(format!("exports/houses/{f}"), f);
+                        push(format!("exports/{f}"), f);
                     }
+                }
+            }
+        }
+        if let Some(ms) = v["materials"].as_array() {
+            for m in ms {
+                if let Some(f) = m["file"].as_str() {
+                    push(format!("exports/{f}"), f);
                 }
             }
         }
@@ -489,6 +496,16 @@ fn collect_outputs(
                 }
             }
         }
+        let mut materials = serde_json::Value::Null;
+        if let Some(a) = run_artifacts(crate::stages::HouseMaterialsStage::ID) {
+            for (rel, bytes) in FileBundle::decode(&a.bytes).files {
+                if rel == "materials.json" {
+                    materials = serde_json::from_slice(&bytes).unwrap();
+                } else {
+                    files.push((format!("exports/houses/{rel}"), bytes));
+                }
+            }
+        }
         for e in entries.iter_mut() {
             let id = e["id"].as_str().unwrap_or("").to_string();
             let sm = summaries.iter().find(|v| v["id"] == id);
@@ -502,6 +519,9 @@ fn collect_outputs(
         });
         if !parts_entries.is_empty() {
             hm["parts"] = serde_json::json!(parts_entries);
+        }
+        if !materials.is_null() {
+            hm["materials"] = materials;
         }
         files.push((
             "exports/houses/manifest.json".to_string(),
@@ -650,7 +670,7 @@ pub fn build_project_observed(
         }
     }
 
-    let houses: Vec<mb_schema::HouseSpec> =
+    let (houses, mat_overrides): (Vec<mb_schema::HouseSpec>, Vec<mb_schema::MaterialOverride>) =
         match mb_schema::load_houses(dir, &project).map_err(BuildError::Schema)? {
             Some(r) => {
                 let diags = mb_schema::validate_houses(&r);
@@ -661,10 +681,26 @@ pub fn build_project_observed(
                     return Err(BuildError::Validation(diags));
                 }
                 info.extend(diags);
-                r.houses
+                (r.houses, r.materials)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
+    // User textures: read now so a missing/non-image file fails the build
+    // before anything is written, and so the stage key covers the bytes.
+    let mut user_textures = Vec::new();
+    for (i, o) in mat_overrides.iter().enumerate() {
+        let bytes = std::fs::read(dir.join(&o.texture)).unwrap_or_default();
+        match mb_schema::texture_kind(&bytes) {
+            Some(kind) => user_textures.push((o.clone(), kind, bytes)),
+            None => {
+                return Err(BuildError::Validation(vec![mb_schema::Diagnostic::error(
+                    "house.material.texture",
+                    format!("/materials/{i}/texture"),
+                    format!("{:?} is missing or not a PNG/JPEG image", o.texture),
+                )]));
+            }
+        }
+    }
     let cell = project.world_scale.cell_size_m;
     let grid = crate::Grid::new(world.extent.width_m, world.extent.depth_m, cell);
     let mut pipe = Pipeline::new(project.seed, project.generator_version);
@@ -738,6 +774,9 @@ pub fn build_project_observed(
         pipe.add(Box::new(crate::stages::HousePartsStage::new(
             houses.clone(),
             project.seed,
+        )));
+        pipe.add(Box::new(crate::stages::HouseMaterialsStage::new(
+            user_textures,
         )));
     }
     pipe.add(Box::new(ManifestStage::new(

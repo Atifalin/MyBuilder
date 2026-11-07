@@ -10,6 +10,17 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 		return out
 	var m: Dictionary = JSON.parse_string(f.get_as_text())
 	var base := manifest_path.get_base_dir()
+	# Detail textures per material slot (UVs are metres; scale = 1/tile).
+	var texs := {}
+	for e in m.get("materials", []):
+		var img := Image.load_from_file(base + "/../" + String(e["file"]))
+		if img == null:
+			printerr("house_loader: texture %s failed" % e["file"])
+			continue
+		img.generate_mipmaps()
+		texs[String(e["slot"])] = {"tex": ImageTexture.create_from_image(img), "tile": float(e["tile_m"])}
+	var mat_cache := {}
+	out["textured"] = 0
 	var part_xf := {}
 	var row_x := 0.0
 	var row_total := -6.0
@@ -45,6 +56,7 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 			var sc := doc.generate_scene(st)
 			var mi := MeshInstance3D.new()
 			mi.mesh = _first_mesh(sc)
+			out["textured"] += _texture_mesh(mi.mesh, texs, mat_cache)
 			mi.visibility_range_begin = ranges[li][0]
 			mi.visibility_range_end = ranges[li][1]
 			mi.visibility_range_end_margin = 5.0
@@ -56,6 +68,7 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 			if li == 0 and inner != null:
 				var ii := MeshInstance3D.new()
 				ii.mesh = inner.mesh
+				out["textured"] += _texture_mesh(ii.mesh, texs, mat_cache)
 				ii.visibility_range_end = 40.0
 				ii.visibility_range_end_margin = 5.0
 				ii.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
@@ -106,6 +119,7 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 			var mm := MultiMesh.new()
 			mm.transform_format = MultiMesh.TRANSFORM_3D
 			mm.mesh = _first_mesh(doc.generate_scene(st))
+			out["textured"] += _texture_mesh(mm.mesh, texs, mat_cache)
 			var xs: Array = part_xf[k]
 			mm.instance_count = xs.size()
 			for i in xs.size():
@@ -137,3 +151,29 @@ static func _first_mesh(n: Node) -> Mesh:
 		if m:
 			return m
 	return null
+
+# Swap each surface's imported material for a shared textured copy, keyed
+# by slot + base colour so houses with the same colours share materials.
+static func _texture_mesh(mesh: Mesh, texs: Dictionary, cache: Dictionary) -> int:
+	var n := 0
+	if mesh == null:
+		return 0
+	for i in mesh.get_surface_count():
+		var mat := mesh.surface_get_material(i) as StandardMaterial3D
+		if mat == null:
+			continue
+		var slot := String(mat.resource_name).to_lower()
+		if not texs.has(slot):
+			continue
+		var key := "%s/%s" % [slot, mat.albedo_color.to_html()]
+		if not cache.has(key):
+			var nm := mat.duplicate() as StandardMaterial3D
+			var t: Dictionary = texs[slot]
+			var k: float = 1.0 / float(t["tile"])
+			nm.albedo_texture = t["tex"]
+			nm.uv1_scale = Vector3(k, k, 1.0)
+			nm.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+			cache[key] = nm
+		mesh.surface_set_material(i, cache[key])
+		n += 1
+	return n

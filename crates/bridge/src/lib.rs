@@ -84,6 +84,8 @@ pub mod clear;
 pub use clear::{ClearReport, ClearRequest, clear_all};
 pub mod new_project;
 pub use new_project::{NewProjectOptions, WorldStart, new_project};
+pub mod materials;
 pub mod preview;
+pub use materials::{clear_material_override, set_material_override};
 pub use mb_pipeline::CancelToken;
 pub use preview::{PreviewSource, Rect};

@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 P="$ROOT/target/gates/house/project"
 rm -rf "$ROOT/target/gates/house"
 mkdir -p "$P"
-cargo run --release -p mb-cli -- new "$P" --size 1024 >/dev/null
+cargo run --release -p mb-cli -- new "$P" --size 1024 --seed 00000000000000a1 >/dev/null
 cargo run --release -p mb-cli -- house add "$P" --id rect --footprint rect --w 10 --d 8 --floors 2 >/dev/null
 cargo run --release -p mb-cli -- house add "$P" --id ell --footprint l --w 14 --d 12 --cut-w 6 --cut-d 5 --floors 2 --complexity 2 --front e >/dev/null
 cargo run --release -p mb-cli -- house add "$P" --id court --footprint courtyard --w 18 --d 18 --court-w 8 --court-d 8 --floors 1 >/dev/null

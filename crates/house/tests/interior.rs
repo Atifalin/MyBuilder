@@ -60,6 +60,7 @@ fn sweep() -> Vec<HouseSpec> {
             schema_version: 1,
             generator_version: 1,
             houses: vec![s.clone()],
+            materials: Vec::new(),
         };
         if validate_houses(&rec)
             .iter()

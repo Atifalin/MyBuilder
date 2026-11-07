@@ -174,3 +174,24 @@ must never depend on the other core crates directly.
   image corner SNAPPED DOWN to the 256 m region grid; r16 is the (nx-1)^2
   cell grid; `update_maps` must run before `get_height`; a script error
   before `quit()` in a --script SceneTree leaves the process running.
+
+## House materials (Phase 3 step 4a)
+
+- `mb_house::materials`: 5 detail-texture slots (plaster, stone, roof,
+  floor, wood; "opening" has none), 256 px near-white greyscale that
+  multiplies the material/vertex colour. Must tile exactly: noise is
+  periodic value noise (lattice wrapped modulo the period) and line
+  patterns straddle the tile border (`on_line`). Goldens:
+  `crates/house/tests/golden/texture_*.blake3`; bump
+  `MATERIAL_GENERATOR_VERSION` on output changes.
+- Stage `house.materials` writes `exports/houses/materials/<slot>.<ext>`;
+  the houses manifest gets `materials: [{slot, file, tile_m, source}]`
+  (file relative to exports/, UVs are metres so engines scale UV by
+  1/tile_m). Stale cleanup reads `materials[].file` and `parts[].files`.
+- User overrides: `recipes/houses.json` `materials: [{slot, texture,
+  tile_m}]` (project-relative png/jpg, tile 0.1..=20 m). Use
+  `mb_bridge::set_material_override` / `clear_material_override` (CLI:
+  `mybuilder house material set|clear`), which copy into
+  `assets/textures/<slot>.<ext>` and write nothing on error. The build
+  reads override bytes up front (magic-byte check) so the stage key
+  covers them.

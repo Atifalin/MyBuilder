@@ -12,6 +12,7 @@ var cam: Camera3D
 var out_dir := "target/gates/house"
 var manifest := ""
 var draw_calls := 0
+var textured := 0
 
 func _init():
 	for a in OS.get_cmdline_user_args():
@@ -126,6 +127,7 @@ func _process(_d) -> bool:
 		houses = res["houses"]
 		parts = res["parts"]
 		part_counts = res["part_instances"]
+		textured = int(res.get("textured", 0))
 		if houses.is_empty():
 			printerr("houses_view: no houses loaded")
 			quit(1)
@@ -181,7 +183,18 @@ func _process(_d) -> bool:
 		return false
 	if frame == 23:
 		_shot("house_interior_haveli.png")
+		_look(_house("rect"), Vector3(2.5, 1.3, -6.5), Vector3(0.5, 0.8, 0))
+		return false
+	if frame == 25:
+		_shot("house_closeup.png")
+		_look(_house("haveli"), Vector3(-6.0, 2.6, -6.0), Vector3(-4.5, 0.45, -4.0))
+		return false
+	if frame == 27:
+		_shot("house_closeup_floor.png")
 		var ok := true
+		if textured == 0:
+			printerr("no textured surfaces")
+			ok = false
 		for h in houses:
 			if h.get_node_or_null("interior") == null:
 				printerr("no interior node on %s" % h.name)
@@ -217,7 +230,7 @@ func _process(_d) -> bool:
 				printerr("part %s instances %s != %d" % [key, part_counts.get(key, -1), want[key]])
 				ok = false
 		if ok:
-			print("HOUSE GODOT PASS houses=%d part_multimeshes=%d draw_calls=%d" % [houses.size(), part_counts.size(), draw_calls])
+			print("HOUSE GODOT PASS houses=%d part_multimeshes=%d draw_calls=%d textured=%d" % [houses.size(), part_counts.size(), draw_calls, textured])
 			quit(0)
 		else:
 			printerr("HOUSE GODOT FAIL")

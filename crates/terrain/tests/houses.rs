@@ -89,6 +89,7 @@ fn mkproj(dir: &Path) {
                 luxuries: Vec::new(),
             },
         ],
+        materials: Vec::new(),
     };
     std::fs::write(
         dir.join("recipes/houses.json"),
@@ -251,4 +252,125 @@ fn house_goldens() {
     }
     assert!(!parts.is_empty(), "reference houses use no parts");
     mb_seed::golden::check_hash(env!("CARGO_MANIFEST_DIR"), "house_parts", &parts);
+}
+
+#[test]
+fn house_materials_exported_and_cleaned() {
+    use mb_house::materials::{SLOTS, texture_png};
+    let d = tmp("mat");
+    mkproj(&d);
+    bld(&d);
+    let mp = d.join("exports/houses/manifest.json");
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();
+    let mats = m["materials"].as_array().unwrap().clone();
+    assert_eq!(mats.len(), SLOTS.len());
+    for (e, s) in mats.iter().zip(SLOTS) {
+        assert_eq!(e["slot"], s.name());
+        assert_eq!(e["source"], "procedural");
+        assert_eq!(e["tile_m"].as_f64().unwrap(), s.tile_m());
+        let f = d.join("exports").join(e["file"].as_str().unwrap());
+        assert_eq!(std::fs::read(f).unwrap(), texture_png(s));
+    }
+    // A material file listed by the previous manifest but no longer
+    // produced is removed on the next build.
+    let stale = d.join("exports/houses/materials/plaster.jpg");
+    std::fs::write(&stale, b"\xFF\xD8\xFFold").unwrap();
+    m["materials"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"slot": "plaster", "file": "houses/materials/plaster.jpg"}));
+    std::fs::write(&mp, serde_json::to_vec(&m).unwrap()).unwrap();
+    let r = bld_rep(&d);
+    assert!(
+        !stale.exists(),
+        "stale material kept; deleted {:?}",
+        r.write.deleted_paths
+    );
+    // Same for a part GLB the previous manifest listed.
+    let old_part = d.join("exports/houses/parts/zz_old/lod0.glb");
+    std::fs::create_dir_all(old_part.parent().unwrap()).unwrap();
+    std::fs::write(&old_part, b"glTF").unwrap();
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();
+    m["parts"].as_array_mut().unwrap().push(serde_json::json!({
+        "key": "zz_old",
+        "files": {"lod0": "houses/parts/zz_old/lod0.glb", "lod1": "houses/parts/zz_old/lod1.glb"}
+    }));
+    std::fs::write(&mp, serde_json::to_vec(&m).unwrap()).unwrap();
+    bld(&d);
+    assert!(!old_part.exists(), "stale part kept");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn house_material_override() {
+    let d = tmp("matov");
+    mkproj(&d);
+    bld(&d);
+    let glb = hash(&d.join("exports/houses/rect/lod0.glb"));
+    let png = mb_house::materials::texture_png(mb_house::materials::TexSlot::Stone);
+    std::fs::create_dir_all(d.join("assets/textures")).unwrap();
+    std::fs::write(d.join("assets/textures/plaster.png"), &png).unwrap();
+    let rp = d.join("recipes/houses.json");
+    let set = |ov: serde_json::Value| {
+        let mut r: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&rp).unwrap()).unwrap();
+        r["materials"] = ov;
+        std::fs::write(&rp, serde_json::to_string_pretty(&r).unwrap()).unwrap();
+    };
+    set(
+        serde_json::json!([{"slot": "plaster", "texture": "assets/textures/plaster.png", "tile_m": 1.5}]),
+    );
+    let manifest = |d: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(d.join("exports/houses/manifest.json")).unwrap())
+            .unwrap()
+    };
+    let rep = bld_rep(&d);
+    let m = manifest(&d);
+    assert_eq!(m["materials"][0]["source"], "user");
+    assert_eq!(m["materials"][0]["tile_m"], 1.5);
+    assert_eq!(
+        std::fs::read(d.join("exports/houses/materials/plaster.png")).unwrap(),
+        png
+    );
+    for p in &rep.write.written_paths {
+        assert!(
+            p == "exports/houses/materials/plaster.png" || p == "exports/houses/manifest.json",
+            "unexpected write {p}"
+        );
+    }
+    // New user bytes (now a JPEG) re-run only the materials stage.
+    std::fs::write(
+        d.join("assets/textures/plaster.jpg"),
+        b"\xFF\xD8\xFF\xE0fake",
+    )
+    .unwrap();
+    set(
+        serde_json::json!([{"slot": "plaster", "texture": "assets/textures/plaster.jpg", "tile_m": 1.5}]),
+    );
+    let rep = bld_rep(&d);
+    assert!(d.join("exports/houses/materials/plaster.jpg").exists());
+    assert!(!d.join("exports/houses/materials/plaster.png").exists());
+    assert!(
+        rep.write
+            .deleted_paths
+            .iter()
+            .any(|p| p.ends_with("plaster.png"))
+    );
+    assert_eq!(hash(&d.join("exports/houses/rect/lod0.glb")), glb);
+    // A non-image fails the build before anything is written.
+    std::fs::write(d.join("assets/textures/plaster.jpg"), b"not an image").unwrap();
+    let mut o = opts(&d);
+    o.full = false;
+    assert!(build_project(&d, &o, &mb_pipeline::CancelToken::new()).is_err());
+    assert!(d.join("exports/houses/materials/plaster.jpg").exists());
+    // Clearing restores the procedural texture and removes the user copy.
+    set(serde_json::json!([]));
+    bld(&d);
+    assert_eq!(manifest(&d)["materials"][0]["source"], "procedural");
+    assert!(!d.join("exports/houses/materials/plaster.jpg").exists());
+    assert_eq!(
+        std::fs::read(d.join("exports/houses/materials/plaster.png")).unwrap(),
+        mb_house::materials::texture_png(mb_house::materials::TexSlot::Plaster)
+    );
+    let _ = std::fs::remove_dir_all(&d);
 }

@@ -9,3 +9,6 @@ mb-seed.workspace = true
 mb-geom.workspace = true
 mb-schema.workspace = true
 png.workspace = true
+
+[dev-dependencies]
+mb-seed = { workspace = true, features = ["golden"] }

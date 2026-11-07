@@ -395,3 +395,66 @@ fn shape_self_intersection_and_size_limits() {
             .any(|x| x.code == "world.shape.too_many_points" && x.severity == Severity::Error)
     );
 }
+
+#[test]
+fn house_material_override_validation() {
+    use mb_schema::{HouseRecipe, MaterialOverride, MaterialSlot, validate_houses};
+    let codes = |m: Vec<MaterialOverride>| -> Vec<String> {
+        let r = HouseRecipe {
+            schema_version: 1,
+            generator_version: 1,
+            houses: Vec::new(),
+            materials: m,
+        };
+        validate_houses(&r)
+            .into_iter()
+            .map(|d| d.code.to_string())
+            .collect()
+    };
+    let ov = |slot, texture: &str, tile_m| MaterialOverride {
+        slot,
+        texture: texture.into(),
+        tile_m,
+    };
+    assert!(
+        codes(vec![ov(
+            MaterialSlot::Plaster,
+            "assets/textures/p.JPG",
+            2.0
+        )])
+        .is_empty()
+    );
+    for (t, tile) in [
+        ("../outside.png", 1.0),
+        ("/abs/p.png", 1.0),
+        ("C:/x/p.png", 1.0),
+        ("assets/p.gif", 1.0),
+        ("assets/noext", 1.0),
+    ] {
+        assert_eq!(
+            codes(vec![ov(MaterialSlot::Wood, t, tile)]),
+            ["house.material.path"],
+            "{t}"
+        );
+    }
+    for tile in [0.05, 25.0, f64::NAN] {
+        assert_eq!(
+            codes(vec![ov(MaterialSlot::Wood, "a.png", tile)]),
+            ["house.material.tile"]
+        );
+    }
+    assert_eq!(
+        codes(vec![
+            ov(MaterialSlot::Roof, "a.png", 1.0),
+            ov(MaterialSlot::Roof, "b.png", 1.0)
+        ]),
+        ["house.material.duplicate"]
+    );
+    // Round-trip: absent list stays absent in JSON.
+    let r: HouseRecipe = serde_json::from_str(r#"{"schema_version":1,"houses":[]}"#).unwrap();
+    assert!(r.materials.is_empty());
+    assert!(!serde_json::to_string(&r).unwrap().contains("materials"));
+    assert_eq!(mb_schema::texture_kind(b"\x89PNGxx"), Some("png"));
+    assert_eq!(mb_schema::texture_kind(b"\xFF\xD8\xFFxx"), Some("jpg"));
+    assert_eq!(mb_schema::texture_kind(b"GIF89a"), None);
+}

@@ -143,6 +143,32 @@ enum HouseCmd {
     },
     /// List houses in the project.
     List { dir: PathBuf },
+    /// Replace or restore a material slot's texture.
+    Material {
+        #[command(subcommand)]
+        cmd: MaterialCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MaterialCmd {
+    /// Use a PNG/JPEG for a slot (copied into assets/textures/).
+    Set {
+        dir: PathBuf,
+        #[arg(long, value_parser = ["plaster", "stone", "roof", "floor", "wood"])]
+        slot: String,
+        #[arg(long)]
+        texture: PathBuf,
+        /// Real-world size of one texture repeat, in metres.
+        #[arg(long, default_value_t = 1.0)]
+        tile: f64,
+    },
+    /// Go back to the procedural texture for a slot.
+    Clear {
+        dir: PathBuf,
+        #[arg(long, value_parser = ["plaster", "stone", "roof", "floor", "wood"])]
+        slot: String,
+    },
 }
 
 fn cmd_new(
@@ -190,6 +216,35 @@ fn cmd_new(
     println!("created project {:?} at {}", project.name, dir.display());
     println!("seed: {seed:016x}");
     Ok(())
+}
+
+fn cmd_material(cmd: MaterialCmd) -> Result<ExitCode, String> {
+    let slot = |n: &str| mb_schema::MaterialSlot::from_name(n).expect("clap-checked slot");
+    match cmd {
+        MaterialCmd::Set {
+            dir,
+            slot: s,
+            texture,
+            tile,
+        } => {
+            mb_bridge::set_material_override(&dir, slot(&s), &texture, tile)
+                .map_err(|e| format!("{e:?}"))?;
+            println!("{s}: using {} (tile {tile} m)", texture.display());
+        }
+        MaterialCmd::Clear { dir, slot: s } => {
+            let had =
+                mb_bridge::clear_material_override(&dir, slot(&s)).map_err(|e| format!("{e:?}"))?;
+            println!(
+                "{s}: {}",
+                if had {
+                    "procedural texture restored"
+                } else {
+                    "no override set"
+                }
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_diags(diags: &[mb_schema::Diagnostic]) {
@@ -244,6 +299,7 @@ fn cmd_house_add(
             schema_version: CURRENT_SCHEMA_VERSION,
             generator_version: 1,
             houses: Vec::new(),
+            materials: Vec::new(),
         }
     };
     let fp = match footprint {
@@ -668,6 +724,7 @@ fn main() -> ExitCode {
                 luxuries.as_deref(),
             ),
             HouseCmd::List { dir } => cmd_house_list(&dir),
+            HouseCmd::Material { cmd } => cmd_material(cmd),
         },
         Command::Hash { dir } => cmd_hash(&dir).map(|_| ExitCode::SUCCESS),
         Command::Info { dir } => cmd_info(&dir),

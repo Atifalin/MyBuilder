@@ -1337,9 +1337,66 @@ pub struct HouseRecipe {
     pub generator_version: u32,
     #[serde(default)]
     pub houses: Vec<HouseSpec>,
+    /// Project-wide user textures replacing procedural material slots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<MaterialOverride>,
 }
 fn one() -> u32 {
     1
+}
+
+/// House material slots that take a detail texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialSlot {
+    Plaster,
+    Stone,
+    Roof,
+    Floor,
+    Wood,
+}
+
+impl MaterialSlot {
+    pub const ALL: [MaterialSlot; 5] = [
+        MaterialSlot::Plaster,
+        MaterialSlot::Stone,
+        MaterialSlot::Roof,
+        MaterialSlot::Floor,
+        MaterialSlot::Wood,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            MaterialSlot::Plaster => "plaster",
+            MaterialSlot::Stone => "stone",
+            MaterialSlot::Roof => "roof",
+            MaterialSlot::Floor => "floor",
+            MaterialSlot::Wood => "wood",
+        }
+    }
+    pub fn from_name(n: &str) -> Option<MaterialSlot> {
+        Self::ALL.into_iter().find(|s| s.name() == n)
+    }
+}
+
+/// A user texture for one slot; `texture` is project-relative and
+/// `tile_m` is the real-world size of one texture repeat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialOverride {
+    pub slot: MaterialSlot,
+    pub texture: String,
+    pub tile_m: f64,
+}
+
+/// "png" / "jpg" from the file's magic bytes, else None.
+pub fn texture_kind(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1489,6 +1546,36 @@ pub fn load_houses(dir: &Path, project: &ProjectFile) -> Result<Option<HouseReci
 
 pub fn validate_houses(recipe: &HouseRecipe) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    for (i, m) in recipe.materials.iter().enumerate() {
+        let path = format!("/materials/{i}");
+        if recipe.materials[..i].iter().any(|o| o.slot == m.slot) {
+            out.push(Diagnostic::error(
+                "house.material.duplicate",
+                format!("{path}/slot"),
+                format!("duplicate material override for {}", m.slot.name()),
+            ));
+        }
+        if !(m.tile_m.is_finite() && (0.1..=20.0).contains(&m.tile_m)) {
+            out.push(Diagnostic::error(
+                "house.material.tile",
+                format!("{path}/tile_m"),
+                format!("tile_m must be within 0.1..=20 m, got {}", m.tile_m),
+            ));
+        }
+        let ext_ok = m.texture.rsplit_once('.').is_some_and(|(_, e)| {
+            matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")
+        });
+        if recipe_path_is_invalid(&m.texture) || !ext_ok {
+            out.push(Diagnostic::error(
+                "house.material.path",
+                format!("{path}/texture"),
+                format!(
+                    "texture {:?} must be a project-relative .png/.jpg/.jpeg path",
+                    m.texture
+                ),
+            ));
+        }
+    }
     let mut seen: Vec<&str> = Vec::new();
     for (i, h) in recipe.houses.iter().enumerate() {
         let path = format!("/houses/{i}");

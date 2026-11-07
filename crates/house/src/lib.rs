@@ -11,6 +11,7 @@ use mb_schema::{Footprint, HouseSpec, Side};
 
 pub mod glb;
 pub mod interior;
+pub mod materials;
 pub mod parts;
 
 pub const CURRENT_HOUSE_GENERATOR_VERSION: u32 = 3;

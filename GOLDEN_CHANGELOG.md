@@ -123,3 +123,8 @@ that never reached a commit.
 | 2026-11-07 | 3 | terrain/house_rect_lod0 | 9def6ea6ae9d | bfc4dcf1c7a4a574e01811af61e8d185472e3054e7b5ccece52d6215551c99b6 | house gen 3: interior furniture and fixtures (essentials + luxuries) as boxes in the LOD0 interior node |
 | 2026-11-07 | 3 | terrain/house_ell_lod0 | 9f7a2219a9ec | 2abb5c064bcf98deddd098cdd5870f8617d343ca38ffc1d8665621aa709a1926 | house gen 3: interior furniture and fixtures (essentials + luxuries) as boxes in the LOD0 interior node |
 | 2026-11-07 | 3 | terrain/house_court_lod0 | 0cb1058d87b8 | f3cf158ebbaf1dfb8271d3e3d06ec902510316fa08977e32ffe8ca821d02fbef | house gen 3: interior furniture and fixtures (essentials + luxuries) as boxes in the LOD0 interior node |
+| 2026-11-07 | 3 | house/texture_plaster | (new) | 247ffea85f37e8ec5f7c2ce2fe20ca750fbbc874eee7c03078cf1c72331370e7 | step 4a: procedural house detail textures (new) |
+| 2026-11-07 | 3 | house/texture_stone | (new) | 3874a4cb07d3e75d68a9a6337f1ea2f7dc30910802cb1ecad7a7e9e5939b7fed | step 4a: procedural house detail textures (new) |
+| 2026-11-07 | 3 | house/texture_roof | (new) | 7434737cc194635567c9ce09457898df2c678182ff1a6bc6beb4a908105bf947 | step 4a: procedural house detail textures (new) |
+| 2026-11-07 | 3 | house/texture_floor | (new) | edfffbd6d5ff017db0bdc8c5f12145baaf9016b64e4eaf81e473f68036b21f42 | step 4a: procedural house detail textures (new) |
+| 2026-11-07 | 3 | house/texture_wood | (new) | 03d55214a5487353b08bdfd5448c4a7a14ffb66e264a15d13c22a6b3eebf416b | step 4a: procedural house detail textures (new) |

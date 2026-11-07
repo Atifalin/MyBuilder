@@ -1891,3 +1891,81 @@ impl mb_pipeline::Stage for HousePartsStage {
         Ok(crate::outputs::FileBundle { files }.encode())
     }
 }
+
+/// Stage emitting the house detail textures (step 4a): procedural per
+/// slot unless the recipe overrides it with a user texture.
+pub struct HouseMaterialsStage {
+    /// (override, file kind "png"/"jpg", file bytes) — bytes are read
+    /// at construction so the cache key covers them.
+    overrides: Vec<(mb_schema::MaterialOverride, &'static str, Vec<u8>)>,
+}
+
+impl HouseMaterialsStage {
+    pub const ID: &'static str = "house.materials";
+    pub fn new(overrides: Vec<(mb_schema::MaterialOverride, &'static str, Vec<u8>)>) -> Self {
+        HouseMaterialsStage { overrides }
+    }
+}
+
+impl mb_pipeline::Stage for HouseMaterialsStage {
+    fn id(&self) -> &str {
+        Self::ID
+    }
+    fn deps(&self) -> &[String] {
+        &[]
+    }
+    fn code_version(&self) -> u32 {
+        mb_house::materials::MATERIAL_GENERATOR_VERSION + mb_house::CURRENT_HOUSE_GENERATOR_VERSION
+    }
+    fn params(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (o, kind, bytes) in &self.overrides {
+            b.extend_from_slice(&serde_json::to_vec(o).unwrap_or_default());
+            b.extend_from_slice(kind.as_bytes());
+            b.extend_from_slice(&mb_seed::hash_bytes(bytes));
+        }
+        b
+    }
+    fn run(
+        &self,
+        _inputs: &[&mb_pipeline::Artifact],
+        _seed: u64,
+        _ctx: &mb_pipeline::RunCtx,
+    ) -> Result<mb_pipeline::Artifact, mb_pipeline::Cancelled> {
+        use mb_house::materials::{SLOTS, texture_png};
+        let mut files = Vec::new();
+        let mut entries = Vec::new();
+        for s in SLOTS {
+            let user = self
+                .overrides
+                .iter()
+                .find(|(o, _, _)| o.slot.name() == s.name());
+            let (rel, tile, source, bytes) = match user {
+                Some((o, kind, bytes)) => (
+                    format!("materials/{}.{kind}", s.name()),
+                    o.tile_m,
+                    "user",
+                    bytes.clone(),
+                ),
+                None => (
+                    format!("materials/{}.png", s.name()),
+                    s.tile_m(),
+                    "procedural",
+                    texture_png(s),
+                ),
+            };
+            entries.push(serde_json::json!({
+                "slot": s.name(),
+                "file": format!("houses/{rel}"),
+                "tile_m": tile,
+                "source": source,
+            }));
+            files.push((rel, bytes));
+        }
+        files.push((
+            "materials.json".to_string(),
+            serde_json::to_vec(&entries).unwrap_or_default(),
+        ));
+        Ok(crate::outputs::FileBundle { files }.encode())
+    }
+}

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mb_schema::{Diagnostic, ProjectFile, Severity, WorldRecipe};
+use mb_schema::{Diagnostic, HouseRecipe, HouseSpec, ProjectFile, Severity, WorldRecipe};
 
 const HISTORY_CAP: usize = 200;
 
@@ -24,6 +24,24 @@ pub enum RecipeEdit {
     RemoveShape {
         id: String,
     },
+    /// Add a house (an empty `id` gets the next free `house-N`). The id
+    /// assigned is reported through `last_added_id()`.
+    AddHouse(Box<HouseSpec>),
+    RemoveHouse {
+        id: String,
+    },
+    /// Record a user texture (see `mb_bridge::import_texture`).
+    SetMaterial(mb_schema::MaterialOverride),
+    ClearMaterial(mb_schema::MaterialSlot),
+}
+
+const HOUSES_REL: &str = "recipes/houses.json";
+
+/// One undo step: the whole editable state (recipes are small).
+#[derive(Clone)]
+struct Snap {
+    world: WorldRecipe,
+    houses: Option<HouseRecipe>,
 }
 
 pub enum BridgeError {
@@ -53,26 +71,37 @@ pub struct Session {
     last_added_id: Option<String>,
     dir: PathBuf,
     project: ProjectFile,
-    world: WorldRecipe,
-    undo: Vec<WorldRecipe>,
-    redo: Vec<WorldRecipe>,
+    cur: Snap,
+    undo: Vec<Snap>,
+    redo: Vec<Snap>,
 }
 
 impl Session {
     pub fn open(dir: &Path) -> Result<Session, BridgeError> {
         let (project, world, _) = mb_schema::load_project(dir).map_err(BridgeError::Schema)?;
+        let houses = mb_schema::load_houses(dir, &project).map_err(BridgeError::Schema)?;
         Ok(Session {
             last_added_id: None,
             dir: dir.to_path_buf(),
             project,
-            world,
+            cur: Snap { world, houses },
             undo: Vec::new(),
             redo: Vec::new(),
         })
     }
 
     pub fn world(&self) -> &WorldRecipe {
-        &self.world
+        &self.cur.world
+    }
+
+    /// Houses in the project (empty when it has no houses recipe yet).
+    pub fn houses(&self) -> &[HouseSpec] {
+        self.cur.houses.as_ref().map_or(&[], |h| &h.houses)
+    }
+
+    /// User texture overrides currently recorded.
+    pub fn materials(&self) -> &[mb_schema::MaterialOverride] {
+        self.cur.houses.as_ref().map_or(&[], |h| &h.materials)
     }
 
     /// The loaded project file (name, seed, generator version).
@@ -98,11 +127,46 @@ impl Session {
     /// this after a successful apply).
     pub fn apply(&mut self, edit: RecipeEdit) -> Result<Vec<Diagnostic>, BridgeError> {
         self.last_added_id = None;
-        let mut candidate = self.world.clone();
+        let mut next = self.cur.clone();
+        let candidate = &mut next.world;
+        let mut houses_edit = false;
         match edit {
             RecipeEdit::SetFeel(f) => candidate.terrain.feel = f,
             RecipeEdit::SetOctaves(o) => candidate.terrain.overrides.octaves = o,
-            RecipeEdit::ReplaceWorld(w) => candidate = *w,
+            RecipeEdit::ReplaceWorld(w) => *candidate = *w,
+            RecipeEdit::SetMaterial(o) => {
+                houses_edit = true;
+                let rec = next.houses.get_or_insert_with(empty_houses);
+                rec.materials.retain(|m| m.slot != o.slot);
+                rec.materials.push(o);
+                rec.materials.sort_by_key(|m| m.slot);
+            }
+            RecipeEdit::ClearMaterial(slot) => {
+                houses_edit = true;
+                if let Some(rec) = next.houses.as_mut() {
+                    rec.materials.retain(|m| m.slot != slot);
+                }
+            }
+            RecipeEdit::AddHouse(spec) => {
+                houses_edit = true;
+                let rec = next.houses.get_or_insert_with(empty_houses);
+                let mut spec = *spec;
+                if spec.id.is_empty() {
+                    let mut n = 1usize;
+                    while rec.houses.iter().any(|h| h.id == format!("house-{n}")) {
+                        n += 1;
+                    }
+                    spec.id = format!("house-{n}");
+                }
+                self.last_added_id = Some(spec.id.clone());
+                rec.houses.push(spec);
+            }
+            RecipeEdit::RemoveHouse { id } => {
+                houses_edit = true;
+                if let Some(rec) = next.houses.as_mut() {
+                    rec.houses.retain(|h| h.id != id);
+                }
+            }
             RecipeEdit::RemoveShape { id } => {
                 candidate.shapes.retain(|s| s.id != id);
             }
@@ -162,25 +226,38 @@ impl Session {
             }
         }
         let mut diags = Vec::new();
-        mb_schema::validate_world(&candidate, self.project.world_scale.cell_size_m, &mut diags);
+        mb_schema::validate_world(
+            &next.world,
+            self.project.world_scale.cell_size_m,
+            &mut diags,
+        );
+        if let Some(rec) = &next.houses {
+            diags.extend(mb_schema::validate_houses(rec));
+            diags.extend(mb_schema::validate_placements(rec, &next.world.extent));
+        }
         if diags.iter().any(|d| d.severity == Severity::Error) {
+            self.last_added_id = None;
             return Ok(diags); // rejected: file and history untouched
         }
-        let prev = std::mem::replace(&mut self.world, candidate);
+        let prev = std::mem::replace(&mut self.cur, next);
         self.undo.push(prev);
         if self.undo.len() > HISTORY_CAP {
             self.undo.remove(0);
         }
         self.redo.clear();
-        self.write_world()?;
+        if houses_edit {
+            self.write_houses()?;
+        } else {
+            self.write_world()?;
+        }
         Ok(diags)
     }
 
     pub fn undo(&mut self) -> Result<bool, BridgeError> {
         match self.undo.pop() {
             Some(w) => {
-                self.redo.push(std::mem::replace(&mut self.world, w));
-                self.write_world()?;
+                self.redo.push(std::mem::replace(&mut self.cur, w));
+                self.write_all()?;
                 Ok(true)
             }
             None => Ok(false),
@@ -190,8 +267,8 @@ impl Session {
     pub fn redo(&mut self) -> Result<bool, BridgeError> {
         match self.redo.pop() {
             Some(w) => {
-                self.undo.push(std::mem::replace(&mut self.world, w));
-                self.write_world()?;
+                self.undo.push(std::mem::replace(&mut self.cur, w));
+                self.write_all()?;
                 Ok(true)
             }
             None => Ok(false),
@@ -199,11 +276,44 @@ impl Session {
     }
 
     fn write_world(&self) -> Result<(), BridgeError> {
-        let path = self.dir.join(&self.project.recipes.world);
-        let text = serde_json::to_string_pretty(&self.world).unwrap() + "\n";
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &text)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        write_json(&self.dir.join(&self.project.recipes.world), &self.cur.world)
     }
+
+    /// Write houses.json, registering it in project.json on first use.
+    fn write_houses(&mut self) -> Result<(), BridgeError> {
+        let Some(rec) = &self.cur.houses else {
+            return Ok(());
+        };
+        if self.project.recipes.houses.is_none() {
+            self.project.recipes.houses = Some(HOUSES_REL.to_string());
+            write_json(&self.dir.join(mb_schema::PROJECT_FILE), &self.project)?;
+        }
+        let rel = self.project.recipes.houses.clone().unwrap();
+        write_json(&self.dir.join(rel), rec)
+    }
+
+    fn write_all(&mut self) -> Result<(), BridgeError> {
+        self.write_world()?;
+        self.write_houses()
+    }
+}
+
+fn empty_houses() -> HouseRecipe {
+    HouseRecipe {
+        schema_version: mb_schema::CURRENT_SCHEMA_VERSION,
+        generator_version: 1,
+        houses: Vec::new(),
+        materials: Vec::new(),
+    }
+}
+
+fn write_json<T: serde::Serialize>(path: &Path, v: &T) -> Result<(), BridgeError> {
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let text = serde_json::to_string_pretty(v).unwrap() + "\n";
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &text)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }

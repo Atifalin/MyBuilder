@@ -54,6 +54,11 @@ func _ready() -> void:
 		var m: Dictionary = res["manifest"]
 		W = m["extent"]["width_m"]
 		D = m["extent"]["depth_m"]
+		# Houses placed in the app, if the project has any.
+		var hm := manifest_path.get_base_dir().path_join("../houses/manifest.json").simplify_path()
+		if FileAccess.file_exists(hm):
+			var hres: Dictionary = HouseLoader.load_houses(hm, self)
+			stats["houses"] = hres["houses"].size()
 	# Light + sky + fog.
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-50, -30, 0)

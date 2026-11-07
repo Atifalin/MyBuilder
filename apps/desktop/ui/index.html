@@ -10,6 +10,7 @@
     <button class="tool" data-t="water">Water</button>
     <button class="tool" data-t="mountain">Mountain</button>
     <button class="tool" data-t="forest">Forest</button>
+    <button class="tool" data-t="house">House</button>
     <button class="tool" data-t="select">Select</button>
     <button id="delBtn" disabled>Delete</button>
   </span>
@@ -30,6 +31,41 @@
     <div class="row">
       <button id="undoBtn">Undo</button><button id="redoBtn">Redo</button>
     </div>
+    <h3>Houses</h3>
+    <label>Preset
+      <select id="hPreset">
+        <option value="small">Small house (8×7 m)</option>
+        <option value="family" selected>Family house (10×8 m)</option>
+        <option value="ell">L-shaped house (14×12 m)</option>
+        <option value="haveli">Haveli with courtyard (20×20 m)</option>
+      </select>
+    </label>
+    <label>Floors <input type="number" id="hFloors" min="1" max="4" value="2"></label>
+    <label>Detail <span id="hCxVal"></span>
+      <input type="range" id="hCx" min="0" max="2" step="1" value="1">
+    </label>
+    <label>Front faces
+      <select id="hFront"><option value="s">south</option><option value="n">north</option><option value="e">east</option><option value="w">west</option></select>
+    </label>
+    <label>Rotation
+      <select id="hRot"><option value="0">0°</option><option value="1">90°</option><option value="2">180°</option><option value="3">270°</option></select>
+    </label>
+    <div id="hLux">
+      <label class="row"><input type="checkbox" value="ac"> AC</label>
+      <label class="row"><input type="checkbox" value="tv"> TV</label>
+      <label class="row"><input type="checkbox" value="washing_machine"> Washing machine</label>
+      <label class="row"><input type="checkbox" value="jhoola"> Jhoola</label>
+      <label class="row"><input type="checkbox" value="pooja_corner"> Pooja corner</label>
+    </div>
+    <div class="dim" id="hHint">Pick the House tool, then click the map to place. Select + Delete removes one.</div>
+    <div class="dim" id="hCount"></div>
+    <h3>Textures</h3>
+    <label>Slot
+      <select id="mSlot"><option>plaster</option><option>stone</option><option>roof</option><option>floor</option><option>wood</option></select>
+    </label>
+    <label>Tile size (m) <input type="number" id="mTile" min="0.1" max="20" step="0.1" value="1.5"></label>
+    <div class="row"><button id="mPick">Use image…</button><button id="mClear">Use built-in</button></div>
+    <div class="dim" id="mList"></div>
     <h3>Actions</h3>
     <button id="buildBtn" class="act">Build (full)</button>
     <button id="rebuildBtn" class="act">Rebuild</button>

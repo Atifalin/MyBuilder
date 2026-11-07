@@ -220,6 +220,9 @@ fn previous_outputs(dir: &Path) -> Vec<(String, bool)> {
                     push(format!("exports/{f}"), f);
                 }
             }
+            if let Some(f) = h["site"]["foundation"].as_str() {
+                push(format!("exports/{f}"), f);
+            }
         }
         if let Some(ps) = v["parts"].as_array() {
             for h in ps {
@@ -508,6 +511,17 @@ fn collect_outputs(
         }
         for e in entries.iter_mut() {
             let id = e["id"].as_str().unwrap_or("").to_string();
+            if let Some(a) = run_artifacts(&crate::stages::HouseSiteStage::stage_id(&id)) {
+                for (rel, bytes) in FileBundle::decode(&a.bytes).files {
+                    if rel == "site.json" {
+                        let mut site: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        site["foundation"] = format!("houses/{id}/foundation.glb").into();
+                        e["site"] = site;
+                    } else {
+                        files.push((format!("exports/houses/{id}/{rel}"), bytes));
+                    }
+                }
+            }
             let sm = summaries.iter().find(|v| v["id"] == id);
             if let Some(sm) = sm {
                 e["instances"] = sm["instances"].clone();
@@ -673,7 +687,8 @@ pub fn build_project_observed(
     let (houses, mat_overrides): (Vec<mb_schema::HouseSpec>, Vec<mb_schema::MaterialOverride>) =
         match mb_schema::load_houses(dir, &project).map_err(BuildError::Schema)? {
             Some(r) => {
-                let diags = mb_schema::validate_houses(&r);
+                let mut diags = mb_schema::validate_houses(&r);
+                diags.extend(mb_schema::validate_placements(&r, &world.extent));
                 if diags
                     .iter()
                     .any(|d| d.severity == mb_schema::Severity::Error)
@@ -769,6 +784,14 @@ pub fn build_project_observed(
             h.clone(),
             project.seed,
         )));
+        if let Some(site) = crate::stages::HouseSiteStage::new(
+            h.clone(),
+            grid,
+            project.generator_version,
+            world.sea_level_m,
+        ) {
+            pipe.add_sliced(Box::new(site));
+        }
     }
     if !houses.is_empty() {
         pipe.add(Box::new(crate::stages::HousePartsStage::new(
@@ -827,6 +850,37 @@ pub fn build_project_observed(
         &houses,
     );
     let write = write_outputs(dir, &outputs)?;
+    for h in &houses {
+        let Some(a) = lookup(&crate::stages::HouseSiteStage::stage_id(&h.id)) else {
+            continue;
+        };
+        let bundle = FileBundle::decode(&a.bytes);
+        let Some((_, b)) = bundle.files.iter().find(|(r, _)| r == "site.json") else {
+            continue;
+        };
+        let site: serde_json::Value = serde_json::from_slice(b).unwrap();
+        let warn = |code: &'static str, msg: String| {
+            let mut d = mb_schema::Diagnostic::warning(code, format!("/houses/{}", h.id), msg);
+            d.entity_id = Some(h.id.clone());
+            d
+        };
+        if site["underwater"] == true {
+            info.push(warn(
+                "house.placement.underwater",
+                format!("house {:?} stands partly below sea level", h.id),
+            ));
+        }
+        if site["steep"] == true {
+            info.push(warn(
+                "house.placement.steep",
+                format!(
+                    "ground under house {:?} drops {:.1} m; it gets a tall foundation",
+                    h.id,
+                    site["foundation_depth"].as_f64().unwrap_or(0.0)
+                ),
+            ));
+        }
+    }
     Ok(BuildReport {
         diagnostics: info,
         run: report,

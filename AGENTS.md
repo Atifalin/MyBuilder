@@ -195,3 +195,24 @@ must never depend on the other core crates directly.
   `assets/textures/<slot>.<ext>` and write nothing on error. The build
   reads override bytes up front (magic-byte check) so the stage key
   covers them.
+
+## Placed houses (Phase 3 step 6)
+
+- `HouseSpec.placement {x, z, rot_quarter}` (world metres; Godot applies
+  `rotation.y = -PI/2 * rot`). `mb_schema::house_site_rect` = footprint +
+  2 m margin (odd turns swap w/d); `validate_placements` rejects houses
+  outside the world or overlapping another site (build, CLI, session).
+- Sliced stage `house.site.<id>` reads only the height nodes under the site
+  rect: house y = highest ground point, `mb_house::foundation` fills down to
+  lowest - 0.3 m (plinth prism + 1.6 m front apron). Manifest house entry
+  gains `site {y, ground_min, ground_max, foundation_depth, foundation,
+  colliders, underwater, steep}`; build warns `house.placement.underwater`
+  / `.steep` (> 6 m drop). Uses coarse heights (detail regions not applied).
+- App: `Session` snapshots world + houses together (undo covers both);
+  edits `AddHouse` (empty id -> `house-N`), `RemoveHouse`, `SetMaterial`
+  (after `mb_bridge::import_texture`), `ClearMaterial`. CLI: `house add
+  --x --z [--rot]`.
+- Gates: `scripts/house-gate.sh` (unplaced row, fixed seed) and
+  `scripts/house-terrain-gate.sh` (6 houses on hilly terrain, prints
+  `HOUSE TERRAIN PASS`). App autotest: `MB_APP_AUTOTEST=<project>
+  target/app/release/mb-app` (macOS has no `timeout`; just run it).

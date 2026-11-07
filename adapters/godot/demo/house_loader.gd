@@ -33,8 +33,11 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 		node.name = h["id"]
 		node.set_meta("mb_house_id", h["id"])
 		var pl = h.get("placement")
+		var site = h.get("site")
 		if pl != null:
-			node.position = Vector3(pl["x"], 0.0, pl["z"])
+			# Placed houses stand at the highest ground point of their site.
+			var y: float = float(site["y"]) if site != null else 0.0
+			node.position = Vector3(pl["x"], y, pl["z"])
 			node.rotation.y = -PI / 2.0 * float(pl["rot_quarter"])
 		else:
 			# Unplaced houses: a row along +X centred on the origin, 6 m apart.
@@ -75,8 +78,25 @@ static func load_houses(manifest_path: String, parent: Node3D) -> Dictionary:
 				ii.name = "interior"
 				node.add_child(ii)
 			sc.free()
+		# Stone foundation down to the lowest ground point (placed houses).
+		if site != null and site.has("foundation"):
+			var fdoc := GLTFDocument.new()
+			var fst := GLTFState.new()
+			if fdoc.append_from_file(base + "/../" + String(site["foundation"]), fst) == OK:
+				var fsc := fdoc.generate_scene(fst)
+				var fm := MeshInstance3D.new()
+				fm.mesh = _first_mesh(fsc)
+				out["textured"] += _texture_mesh(fm.mesh, texs, mat_cache)
+				fm.name = "foundation"
+				node.add_child(fm)
+				fsc.free()
+			else:
+				printerr("house_loader: foundation %s failed" % site["foundation"])
 		var body := StaticBody3D.new()
-		for c in h.get("colliders", []):
+		var cols: Array = h.get("colliders", []).duplicate()
+		if site != null:
+			cols.append_array(site.get("colliders", []))
+		for c in cols:
 			var sh := CollisionShape3D.new()
 			var bx := BoxShape3D.new()
 			bx.size = Vector3(c["half"][0] * 2.0, c["half"][1] * 2.0, c["half"][2] * 2.0)

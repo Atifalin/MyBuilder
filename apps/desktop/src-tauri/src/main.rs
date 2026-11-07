@@ -324,6 +324,99 @@ fn shapes(state: tauri::State<Shared>) -> Result<String, String> {
     Ok(serde_json::to_string(&list).unwrap())
 }
 
+/// Add a house from the Houses panel. `spec` is HouseSpec JSON (an empty
+/// id gets the next free `house-N`). Rejections come back as Err with the
+/// validation messages.
+#[tauri::command]
+fn add_house(state: tauri::State<Shared>, spec: String) -> Result<String, String> {
+    let spec: mb_schema::HouseSpec = serde_json::from_str(&spec).map_err(|e| e.to_string())?;
+    let mut g = state.inner().lock().map_err(|e| e.to_string())?;
+    let p = g.as_mut().ok_or("no project open")?;
+    if p.building {
+        return Err("a build is running".to_string());
+    }
+    let diags = p
+        .session
+        .apply(mb_bridge::RecipeEdit::AddHouse(Box::new(spec)))
+        .map_err(|e| format!("{e:?}"))?;
+    let errors: Vec<String> = diags
+        .iter()
+        .filter(|d| d.severity == mb_schema::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    p.dirty = true;
+    p.session
+        .last_added_id()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "add_house produced no id".to_string())
+}
+
+#[tauri::command]
+fn remove_house(state: tauri::State<Shared>, id: String) -> Result<String, String> {
+    apply_edit(&state, mb_bridge::RecipeEdit::RemoveHouse { id })
+}
+
+/// Houses with their world-space site boxes for the map overlay.
+#[tauri::command]
+fn houses(state: tauri::State<Shared>) -> Result<String, String> {
+    let g = state.inner().lock().map_err(|e| e.to_string())?;
+    let p = g.as_ref().ok_or("no project open")?;
+    let list: Vec<serde_json::Value> = p
+        .session
+        .houses()
+        .iter()
+        .map(|h| {
+            json!({
+                "id": h.id,
+                "footprint": h.footprint,
+                "floors": h.floors,
+                "front": h.front,
+                "placement": h.placement,
+                "site": mb_schema::house_site_rect(h),
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string(&list).unwrap())
+}
+
+/// Copy a user texture into the project and use it for `slot`.
+#[tauri::command]
+fn set_material(
+    state: tauri::State<Shared>,
+    slot: String,
+    path: String,
+    tile_m: f64,
+) -> Result<String, String> {
+    let slot = mb_schema::MaterialSlot::from_name(&slot).ok_or("bad slot")?;
+    let dir = {
+        let g = state.inner().lock().map_err(|e| e.to_string())?;
+        let p = g.as_ref().ok_or("no project open")?;
+        if p.building {
+            return Err("a build is running".to_string());
+        }
+        p.dir.clone()
+    };
+    let ov = mb_bridge::import_texture(&dir, slot, Path::new(&path), tile_m)
+        .map_err(|e| format!("{e:?}"))?;
+    apply_edit(&state, mb_bridge::RecipeEdit::SetMaterial(ov))
+}
+
+#[tauri::command]
+fn clear_material(state: tauri::State<Shared>, slot: String) -> Result<String, String> {
+    let slot = mb_schema::MaterialSlot::from_name(&slot).ok_or("bad slot")?;
+    apply_edit(&state, mb_bridge::RecipeEdit::ClearMaterial(slot))
+}
+
+#[tauri::command]
+fn materials(state: tauri::State<Shared>) -> Result<String, String> {
+    let g = state.inner().lock().map_err(|e| e.to_string())?;
+    let p = g.as_ref().ok_or("no project open")?;
+    Ok(serde_json::to_string(p.session.materials()).unwrap())
+}
+
 #[tauri::command]
 fn cancel_build(state: tauri::State<Shared>) -> Result<(), String> {
     let g = state.inner().lock().map_err(|e| e.to_string())?;
@@ -446,6 +539,8 @@ fn autotest_report(app: tauri::AppHandle, report: String) -> Result<(), String> 
         && v["tiles_alpha"].as_i64().unwrap_or(0) > 0
         && v["shapes_after"].as_i64().unwrap_or(0) == 1
         && v["shapes_after_undo"].as_i64().unwrap_or(-1) == 0
+        && v["houses_after"].as_i64().unwrap_or(-1) == 1
+        && v["houses_after_undo"].as_i64().unwrap_or(-1) == 0
         && v["unhandled"].as_i64().unwrap_or(9) == 0
         && v["can_undo"] == true
         && v["can_redo"] == true
@@ -482,6 +577,12 @@ fn main() {
             add_shape,
             remove_shape,
             shapes,
+            add_house,
+            remove_house,
+            houses,
+            set_material,
+            clear_material,
+            materials,
         ])
         .setup(move |app| {
             if autotest.is_some() {

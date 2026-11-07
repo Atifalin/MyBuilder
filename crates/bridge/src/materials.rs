@@ -57,6 +57,39 @@ fn save(path: &Path, recipe: &HouseRecipe) -> Result<(), BridgeError> {
     )
 }
 
+/// Read `src`, check it is a PNG/JPEG (magic bytes) and return the
+/// project-relative path it will live at plus its bytes. Writes nothing.
+fn read_texture(slot: MaterialSlot, src: &Path) -> Result<(String, Vec<u8>), BridgeError> {
+    let bytes = std::fs::read(src)?;
+    let kind = mb_schema::texture_kind(&bytes)
+        .ok_or_else(|| invalid(format!("{} is not a PNG or JPEG image", src.display())))?;
+    Ok((format!("assets/textures/{}.{kind}", slot.name()), bytes))
+}
+
+/// Copy a PNG/JPEG into `<dir>/assets/textures/<slot>.<ext>` and return the
+/// override to record (through `Session::apply(RecipeEdit::SetMaterial)`
+/// in the app). Checks the image and `tile_m` first; on error nothing is
+/// written.
+pub fn import_texture(
+    dir: &Path,
+    slot: MaterialSlot,
+    src: &Path,
+    tile_m: f64,
+) -> Result<MaterialOverride, BridgeError> {
+    if !(tile_m.is_finite() && (0.1..=20.0).contains(&tile_m)) {
+        return Err(invalid(format!(
+            "tile must be within 0.1..=20 m, got {tile_m}"
+        )));
+    }
+    let (rel, bytes) = read_texture(slot, src)?;
+    atomic_write(&dir.join(&rel), &bytes)?;
+    Ok(MaterialOverride {
+        slot,
+        texture: rel,
+        tile_m,
+    })
+}
+
 /// Copy `src` (PNG or JPEG, by magic bytes) into the project and point
 /// `slot` at it. Validates everything first: on error nothing is written.
 pub fn set_material_override(
@@ -65,11 +98,8 @@ pub fn set_material_override(
     src: &Path,
     tile_m: f64,
 ) -> Result<(), BridgeError> {
-    let bytes = std::fs::read(src)?;
-    let kind = mb_schema::texture_kind(&bytes)
-        .ok_or_else(|| invalid(format!("{} is not a PNG or JPEG image", src.display())))?;
+    let (rel, bytes) = read_texture(slot, src)?;
     let (path, mut recipe) = load(dir)?;
-    let rel = format!("assets/textures/{}.{kind}", slot.name());
     recipe.materials.retain(|o| o.slot != slot);
     recipe.materials.push(MaterialOverride {
         slot,

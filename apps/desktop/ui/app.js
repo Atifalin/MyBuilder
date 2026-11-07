@@ -49,6 +49,7 @@ async function refresh() {
   $("emptyHint").classList.toggle("hidden", !!st.has_preview);
   if (!fit && st.has_preview) fitWorld();
   refreshShapes();
+  refreshHouses();
 }
 function fitWorld() {
   const c = $("map");
@@ -100,6 +101,9 @@ function draw() {
     s.points.forEach(([x,z],i) => { const [cx,cy]=w2c(x,z); i?ctx.lineTo(cx,cy):ctx.moveTo(cx,cy); });
     ctx.closePath(); ctx.stroke();
   }
+  // houses: site box (dashed), footprint (filled), front tick
+  for (const h of houseList) drawHouse(ctx, h, h.id === selHouse ? 3 : 1.5, 1);
+  if (tool === "house" && hover) drawHouse(ctx, ghostHouse(hover[0], hover[1]), 1.5, 0.5);
   // live stroke
   if (stroke && stroke.length) {
     ctx.strokeStyle = KIND_COLOR[tool] || "#fff"; ctx.lineWidth = 2;
@@ -119,9 +123,12 @@ document.querySelectorAll(".tool").forEach(b => b.onclick = () => {
   b.classList.add("on"); tool = b.dataset.t;
 });
 $("delBtn").onclick = safe(async () => {
+  if (selHouse) { await invoke("remove_house", { id: selHouse }); selHouse=null; $("delBtn").disabled=true; refresh(); return; }
   if (selId) { await invoke("remove_shape", { id: selId }); selId=null; await refreshShapes(); refresh(); }
 });
 window.addEventListener("keydown", (e) => {
+  if ((e.key==="Delete"||e.key==="Backspace") && selHouse && document.activeElement.tagName !== "INPUT")
+    invoke("remove_house",{id:selHouse}).then(()=>{selHouse=null;refresh();}).catch(e=>log(String(e),"log-err"));
   if ((e.key==="Delete"||e.key==="Backspace") && selId)
     invoke("remove_shape",{id:selId}).then(()=>{selId=null;refreshShapes();refresh();}).catch(e=>log(String(e),"log-err"));
   if (e.key==="Escape") stroke=null;
@@ -158,7 +165,17 @@ cv.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
   if (tool === "pan") return; // pan handled below
   const [wx,wz] = c2w(e.offsetX, e.offsetY);
+  if (tool === "house") {
+    placeHouse(wx, wz);
+    return;
+  }
   if (tool === "select") {
+    selHouse = null;
+    for (const h of houseList) {
+      const r = h.site;
+      if (r && wx >= r[0] && wx <= r[2] && wz >= r[1] && wz <= r[3]) selHouse = h.id;
+    }
+    if (selHouse) { selId = null; $("delBtn").disabled = false; draw(); return; }
     let best=null, bestArea=1e30;
     for (const s of shapeList)
       if (pip(wx,wz,s.points)) {
@@ -172,6 +189,11 @@ cv.addEventListener("pointerdown", (e) => {
   }
 });
 window.addEventListener("pointermove", (e) => {
+  if (tool === "house") {
+    const rect = cv.getBoundingClientRect();
+    hover = c2w(e.clientX-rect.left, e.clientY-rect.top);
+    draw();
+  }
   if (!stroke) return;
   const rect = cv.getBoundingClientRect();
   const [wx,wz] = c2w(e.clientX-rect.left, e.clientY-rect.top);
@@ -192,6 +214,98 @@ window.addEventListener("pointerup", async (e) => {
     } catch (e) { log(String(e), "log-err"); }
   }
   draw();
+});
+// ---- houses ----
+let houseList = [];
+let selHouse = null;
+let hover = null;
+const PRESETS = {
+  small:  { footprint: { type: "rect", w: 8, d: 7 }, floors: 1, complexity: 0 },
+  family: { footprint: { type: "rect", w: 10, d: 8 }, floors: 2, complexity: 1 },
+  ell:    { footprint: { type: "l", w: 14, d: 12, cut_w: 6, cut_d: 5 }, floors: 2, complexity: 1 },
+  haveli: { footprint: { type: "courtyard", w: 20, d: 20, court_w: 8, court_d: 8 }, floors: 2, complexity: 2 },
+};
+const SITE_MARGIN = 2.0; // mb_schema::HOUSE_SITE_MARGIN_M
+$("hPreset").onchange = () => {
+  const p = PRESETS[$("hPreset").value];
+  $("hFloors").value = p.floors; $("hCx").value = p.complexity; $("hCxVal").textContent = p.complexity;
+};
+$("hCx").oninput = () => $("hCxVal").textContent = $("hCx").value;
+$("hCxVal").textContent = $("hCx").value;
+function houseSpec(x, z) {
+  const p = PRESETS[$("hPreset").value];
+  const lux = [...document.querySelectorAll("#hLux input:checked")].map(i => i.value);
+  return {
+    id: "",
+    footprint: p.footprint,
+    floors: Math.max(1, Math.min(4, parseInt($("hFloors").value) || 1)),
+    complexity: parseInt($("hCx").value),
+    front: $("hFront").value,
+    luxuries: lux,
+    placement: { x: Math.round(x * 10) / 10, z: Math.round(z * 10) / 10, rot_quarter: parseInt($("hRot").value) },
+  };
+}
+// Same box as mb_schema::house_site_rect.
+function siteRect(fp, pl) {
+  let w = fp.w, d = fp.d;
+  if (pl.rot_quarter % 2 === 1) [w, d] = [d, w];
+  return [pl.x - w/2 - SITE_MARGIN, pl.z - d/2 - SITE_MARGIN, pl.x + w/2 + SITE_MARGIN, pl.z + d/2 + SITE_MARGIN];
+}
+function ghostHouse(x, z) {
+  const s = houseSpec(x, z);
+  return { id: "", footprint: s.footprint, front: s.front, placement: s.placement, site: siteRect(s.footprint, s.placement) };
+}
+// Local front direction rotated like Godot's rotation.y = -PI/2 * rot.
+function frontDir(front, rot) {
+  let [x, z] = { S: [0,-1], N: [0,1], E: [1,0], W: [-1,0] }[String(front).toUpperCase()] || [0,-1];
+  for (let i = 0; i < rot; i++) [x, z] = [-z, x];
+  return [x, z];
+}
+function drawHouse(ctx, h, lw, alpha) {
+  const r = h.site; if (!r) return;
+  const m = SITE_MARGIN;
+  const [a0, b0] = w2c(r[0] + m, r[1] + m), [a1, b1] = w2c(r[2] - m, r[3] - m);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "rgba(230,150,80,0.55)";
+  ctx.fillRect(a0, b0, a1 - a0, b1 - b0);
+  ctx.strokeStyle = "#e69650"; ctx.lineWidth = lw;
+  ctx.strokeRect(a0, b0, a1 - a0, b1 - b0);
+  const [s0, t0] = w2c(r[0], r[1]), [s1, t1] = w2c(r[2], r[3]);
+  ctx.setLineDash([4, 3]); ctx.lineWidth = 1; ctx.strokeRect(s0, t0, s1 - s0, t1 - t0); ctx.setLineDash([]);
+  const pl = h.placement;
+  const [fx, fz] = frontDir(h.front, pl.rot_quarter);
+  const [cx, cy] = w2c(pl.x, pl.z);
+  const half = Math.min(a1 - a0, b1 - b0) / 2;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + fx * half, cy + fz * half); ctx.stroke();
+  if (h.id && a1 - a0 > 30) { ctx.fillStyle = "#fff"; ctx.font = "11px sans-serif"; ctx.fillText(h.id, a0 + 2, b0 - 3); }
+  ctx.globalAlpha = 1;
+}
+async function placeHouse(x, z) {
+  try {
+    const id = await invoke("add_house", { spec: JSON.stringify(houseSpec(x, z)) });
+    log(`placed ${id} at (${x.toFixed(1)}, ${z.toFixed(1)})`, "log-ok");
+    refresh();
+  } catch (e) { log("can't place house here: " + e, "log-err"); }
+}
+async function refreshHouses() {
+  try { houseList = JSON.parse(await invoke("houses")).filter(h => h.placement); } catch { houseList = []; }
+  $("hCount").textContent = houseList.length ? `${houseList.length} placed` : "";
+  try {
+    const ms = JSON.parse(await invoke("materials"));
+    $("mList").textContent = ms.length ? ms.map(m => `${m.slot}: ${m.texture} (${m.tile_m} m)`).join("\n") : "all built-in";
+  } catch { $("mList").textContent = ""; }
+  draw();
+}
+$("mPick").onclick = safe(async () => {
+  const sel = await T.dialog.open({ multiple: false, filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg"] }] });
+  if (!sel) return;
+  await invoke("set_material", { slot: $("mSlot").value, path: sel, tileM: parseFloat($("mTile").value) });
+  log(`${$("mSlot").value}: using ${sel} — Rebuild to update`, "log-ok");
+  refresh();
+});
+$("mClear").onclick = safe(async () => {
+  await invoke("clear_material", { slot: $("mSlot").value });
+  refresh();
 });
 // pan + zoom
 let drag = null;
@@ -378,6 +492,15 @@ async function autotest() {
   await invoke("undo");
   await refreshShapes();
   rep.shapes_after_undo = shapeList.length - n0; // expect 0
+  // Houses: place through the panel path, a second click on the same
+  // spot is rejected (overlap), undo removes the house.
+  await placeHouse(0, 0);
+  await placeHouse(0, 0);
+  await refreshHouses();
+  rep.houses_after = houseList.length; // expect 1
+  await invoke("undo");
+  await refreshHouses();
+  rep.houses_after_undo = houseList.length; // expect 0
   // capture undo/redo state BEFORE clear_all (it reopens the session)
   const st3 = JSON.parse(await invoke("state"));
   rep.can_undo = st3.can_undo; rep.can_redo = st3.can_redo;

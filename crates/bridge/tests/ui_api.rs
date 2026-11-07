@@ -217,6 +217,21 @@ fn event_stream_full_and_incremental() {
                 assert_eq!((a, g, x), (a2, g2, x2));
                 assert!((m - m2).abs() < 1e-9, "ms drift {m} vs {m2}");
             }
+            (
+                BuildEvent::Finished {
+                    status: s,
+                    error: er,
+                    ms: m,
+                },
+                BuildEvent::Finished {
+                    status: s2,
+                    error: er2,
+                    ms: m2,
+                },
+            ) => {
+                assert_eq!((s, er), (s2, er2));
+                assert!((m - m2).abs() < 1e-9, "ms drift {m} vs {m2}");
+            }
             _ => assert_eq!(*e, back),
         }
     }
@@ -660,4 +675,139 @@ fn cli_json_events_and_cancel() {
     });
     assert!(cancelled, "no cancelled event in:\n{text}");
     assert_eq!(out.status.code(), Some(2), "exit code: {:?}", out.status);
+}
+
+// ---- Houses through the session (Phase 3 step 6) ----
+
+fn house_at(x: f64, z: f64, rot: u8) -> HouseSpec {
+    serde_json::from_value(serde_json::json!({
+        "id": "",
+        "footprint": {"type": "rect", "w": 10.0, "d": 8.0},
+        "floors": 2,
+        "placement": {"x": x, "z": z, "rot_quarter": rot},
+    }))
+    .unwrap()
+}
+
+#[test]
+fn session_houses_place_undo_and_build() {
+    let d = tmpdir("houses");
+    make_project(&d);
+    let mut s = mb_bridge::Session::open(&d).unwrap();
+    assert!(s.houses().is_empty());
+    let errs = |diags: Vec<Diagnostic>| -> Vec<&'static str> {
+        diags
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.code)
+            .collect()
+    };
+    // First placement creates houses.json and registers it.
+    let dg = s
+        .apply(mb_bridge::RecipeEdit::AddHouse(Box::new(house_at(
+            10.0, 10.0, 0,
+        ))))
+        .unwrap();
+    assert!(errs(dg).is_empty());
+    assert_eq!(s.last_added_id(), Some("house-1"));
+    let pj: ProjectFile =
+        serde_json::from_str(&std::fs::read_to_string(d.join(PROJECT_FILE)).unwrap()).unwrap();
+    assert_eq!(pj.recipes.houses.as_deref(), Some("recipes/houses.json"));
+    // Overlap and outside-the-world are rejected without changing anything.
+    let before = std::fs::read_to_string(d.join("recipes/houses.json")).unwrap();
+    let dg = s
+        .apply(mb_bridge::RecipeEdit::AddHouse(Box::new(house_at(
+            14.0, 12.0, 1,
+        ))))
+        .unwrap();
+    assert_eq!(errs(dg), ["house.placement.overlap"]);
+    let dg = s
+        .apply(mb_bridge::RecipeEdit::AddHouse(Box::new(house_at(
+            125.0, 0.0, 0,
+        ))))
+        .unwrap();
+    assert_eq!(errs(dg), ["house.placement.outside"]);
+    assert_eq!(s.last_added_id(), None);
+    assert_eq!(
+        std::fs::read_to_string(d.join("recipes/houses.json")).unwrap(),
+        before
+    );
+    assert_eq!(s.houses().len(), 1);
+    // Second house, a texture override, then undo/redo across both kinds.
+    s.apply(mb_bridge::RecipeEdit::AddHouse(Box::new(house_at(
+        -30.0, -20.0, 1,
+    ))))
+    .unwrap();
+    assert_eq!(s.last_added_id(), Some("house-2"));
+    let png = d.join("my_wall.png");
+    std::fs::write(&png, b"\x89PNG\r\n\x1a\nbody").unwrap();
+    let ov = mb_bridge::import_texture(&d, MaterialSlot::Plaster, &png, 1.5).unwrap();
+    assert!(errs(s.apply(mb_bridge::RecipeEdit::SetMaterial(ov)).unwrap()).is_empty());
+    assert!(d.join("assets/textures/plaster.png").exists());
+    s.apply(mb_bridge::RecipeEdit::SetFeel(TerrainFeel::Bumpy))
+        .unwrap();
+    let on_disk = |d: &Path| -> HouseRecipe {
+        serde_json::from_str(&std::fs::read_to_string(d.join("recipes/houses.json")).unwrap())
+            .unwrap()
+    };
+    assert!(s.undo().unwrap()); // feel
+    assert_eq!(on_disk(&d).houses.len(), 2);
+    assert_eq!(on_disk(&d).materials.len(), 1);
+    assert!(s.undo().unwrap()); // material
+    assert!(on_disk(&d).materials.is_empty());
+    assert!(s.undo().unwrap()); // house-2
+    assert_eq!(on_disk(&d).houses.len(), 1);
+    assert!(s.redo().unwrap());
+    assert!(s.redo().unwrap());
+    assert_eq!(on_disk(&d).houses.len(), 2);
+    assert_eq!(on_disk(&d).materials.len(), 1);
+    // Remove, then build: placed houses get a site and a foundation.
+    s.apply(mb_bridge::RecipeEdit::RemoveHouse {
+        id: "house-1".into(),
+    })
+    .unwrap();
+    s.apply(mb_bridge::RecipeEdit::AddHouse(Box::new(house_at(
+        20.0, 5.0, 2,
+    ))))
+    .unwrap();
+    assert_eq!(s.last_added_id(), Some("house-1"));
+    let out = run(
+        &d,
+        BuildMode::Full,
+        &mb_bridge::CancelToken::new(),
+        &mut |_| {},
+    );
+    assert_eq!(out.status, "ok", "{:?}", out.error);
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.join("exports/houses/manifest.json")).unwrap())
+            .unwrap();
+    let hs = m["houses"].as_array().unwrap();
+    assert_eq!(hs.len(), 2);
+    for h in hs {
+        let site = &h["site"];
+        let (y, lo) = (
+            site["y"].as_f64().unwrap(),
+            site["ground_min"].as_f64().unwrap(),
+        );
+        assert!(y.is_finite() && lo <= y, "{site}");
+        assert!((site["foundation_depth"].as_f64().unwrap() - (y - lo + 0.3)).abs() < 1e-9);
+        let f =
+            std::fs::read(d.join("exports").join(site["foundation"].as_str().unwrap())).unwrap();
+        assert_eq!(&f[0..4], b"glTF");
+    }
+    assert_eq!(m["materials"][0]["source"], "user");
+    // Removing a house removes its foundation on the next build.
+    s.apply(mb_bridge::RecipeEdit::RemoveHouse {
+        id: "house-2".into(),
+    })
+    .unwrap();
+    let out = run(
+        &d,
+        BuildMode::Incremental,
+        &mb_bridge::CancelToken::new(),
+        &mut |_| {},
+    );
+    assert_eq!(out.status, "ok", "{:?}", out.error);
+    assert!(!d.join("exports/houses/house-2/foundation.glb").exists());
+    assert!(d.join("exports/houses/house-1/foundation.glb").exists());
 }

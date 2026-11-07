@@ -1799,6 +1799,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mb-house"
+version = "0.1.0"
+dependencies = [
+ "mb-geom",
+ "mb-schema",
+ "mb-seed",
+ "png",
+]
+
+[[package]]
 name = "mb-pipeline"
 version = "0.1.0"
 dependencies = [
@@ -1829,6 +1839,7 @@ name = "mb-terrain"
 version = "0.1.0"
 dependencies = [
  "mb-geom",
+ "mb-house",
  "mb-pipeline",
  "mb-schema",
  "mb-seed",

@@ -128,3 +128,9 @@ that never reached a commit.
 | 2026-11-07 | 3 | house/texture_roof | (new) | 7434737cc194635567c9ce09457898df2c678182ff1a6bc6beb4a908105bf947 | step 4a: procedural house detail textures (new) |
 | 2026-11-07 | 3 | house/texture_floor | (new) | edfffbd6d5ff017db0bdc8c5f12145baaf9016b64e4eaf81e473f68036b21f42 | step 4a: procedural house detail textures (new) |
 | 2026-11-07 | 3 | house/texture_wood | (new) | 03d55214a5487353b08bdfd5448c4a7a14ffb66e264a15d13c22a6b3eebf416b | step 4a: procedural house detail textures (new) |
+| 2026-11-07 | 3 | terrain/house_rect_lod0 | bfc4dcf1c7a4 | 1d1754e830d202393eab8f9a92c78dce2bed7828e97ad175698cc91a92f72591 | house gen 3: plinth side faces get metre UVs so the stone texture shows |
+| 2026-11-07 | 3 | terrain/house_rect_lod1 | 0e714f556dc7 | 173931e7a28516cfc400adcf87da71582465c9e38c2d6f72686f34619bf9c94d | house gen 3: plinth side faces get metre UVs so the stone texture shows |
+| 2026-11-07 | 3 | terrain/house_ell_lod0 | 2abb5c064bcf | dae25741473bfbc2c2f802b189eea56d5e6d1863aa1370483dd021b10d822b10 | house gen 3: plinth side faces get metre UVs so the stone texture shows |
+| 2026-11-07 | 3 | terrain/house_ell_lod1 | 8dff4b2406c7 | d9abb59e795fd0c6942624806cb098f1a9556a825252e6241227cc8abc12f952 | house gen 3: plinth side faces get metre UVs so the stone texture shows |
+| 2026-11-07 | 3 | terrain/house_court_lod0 | f3cf158ebbaf | 4f0bfa55fea4665c82d218535345727fe6cd1a0128b9a46156f7d8f15c4d411a | house gen 3: plinth side faces get metre UVs so the stone texture shows |
+| 2026-11-07 | 3 | terrain/house_court_lod1 | de1a3fca06e8 | 9b0fd06a822f7cf129d2f179e3413949a3d69d6744a2be1cace3e29e50a9c352 | house gen 3: plinth side faces get metre UVs so the stone texture shows |

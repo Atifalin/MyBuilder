@@ -1161,15 +1161,15 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
         let (p, q) = (plx[i], plx[(i + 1) % plx.len()]);
         let (nx, nz) = edge_normal(p, q);
         for l in 0..2 {
-            lod[l].quad(
+            lod[l].quad_facing(
                 Mat::Stone,
-                [m(p[0]), m(mm(plinth)), m(p[1])],
-                [m(q[0]), m(mm(plinth)), m(q[1])],
-                [m(q[0]), 0.0, m(q[1])],
-                [m(p[0]), 0.0, m(p[1])],
+                [
+                    [m(p[0]), m(mm(plinth)), m(p[1])],
+                    [m(q[0]), m(mm(plinth)), m(q[1])],
+                    [m(q[0]), 0.0, m(q[1])],
+                    [m(p[0]), 0.0, m(p[1])],
+                ],
                 [nx as f32, 0.0, nz as f32],
-                &[[0.0; 2]; 4],
-                false,
             );
         }
     }
@@ -1522,6 +1522,94 @@ pub fn generate(spec: &HouseSpec, seed: u64) -> HouseMesh {
         plaster_rgb,
         bounds: (mn, mx),
     }
+}
+
+/// Stone foundation for a house on uneven ground. The house stands at the
+/// highest ground point of its site (house y = 0), so this fills from
+/// `-depth_m` up to y = 0: a prism under the plinth plus a 1.6 m apron
+/// along the front, under the door steps, whose top is a visible terrace.
+/// Returns the mesh and its box colliders.
+pub fn foundation(spec: &HouseSpec, depth_m: f64) -> (Lod, Vec<BoxCollider>) {
+    let (outer, _) = plan(spec);
+    let plx = inward_offset(&outer, mm(-0.4));
+    let mut b = Bld::new();
+    let y0 = -(mm(depth_m.max(0.0)) as f32) / 1000.0;
+    for i in 0..plx.len() {
+        let (p, q) = (plx[i], plx[(i + 1) % plx.len()]);
+        let (nx, nz) = edge_normal(p, q);
+        b.quad_facing(
+            Mat::Stone,
+            [
+                [m(p[0]), 0.0, m(p[1])],
+                [m(q[0]), 0.0, m(q[1])],
+                [m(q[0]), y0, m(q[1])],
+                [m(p[0]), y0, m(p[1])],
+            ],
+            [nx as f32, 0.0, nz as f32],
+        );
+    }
+    let (x0, z0) = (
+        plx.iter().map(|p| p[0]).min().unwrap(),
+        plx.iter().map(|p| p[1]).min().unwrap(),
+    );
+    let (x1, z1) = (
+        plx.iter().map(|p| p[0]).max().unwrap(),
+        plx.iter().map(|p| p[1]).max().unwrap(),
+    );
+    let a = mm(1.6);
+    let (fx, fz) = side_dir(spec.front);
+    let ap = match (fx as i64, fz as i64) {
+        (0, -1) => [x0, z0 - a, x1, z0],
+        (0, 1) => [x0, z1, x1, z1 + a],
+        (1, 0) => [x1, z0, x1 + a, z1],
+        _ => [x0 - a, z0, x0, z1],
+    };
+    let (ax0, az0, ax1, az1) = (m(ap[0]), m(ap[1]), m(ap[2]), m(ap[3]));
+    b.quad_facing(
+        Mat::Stone,
+        [
+            [ax0, 0.0, az0],
+            [ax1, 0.0, az0],
+            [ax1, 0.0, az1],
+            [ax0, 0.0, az1],
+        ],
+        [0.0, 1.0, 0.0],
+    );
+    // Apron sides, except the one against the plinth prism.
+    let sides: [([[f32; 2]; 2], [f32; 3]); 4] = [
+        ([[ax0, az0], [ax1, az0]], [0.0, 0.0, -1.0]),
+        ([[ax0, az1], [ax1, az1]], [0.0, 0.0, 1.0]),
+        ([[ax0, az0], [ax0, az1]], [-1.0, 0.0, 0.0]),
+        ([[ax1, az0], [ax1, az1]], [1.0, 0.0, 0.0]),
+    ];
+    for ([p, q], n) in sides {
+        if (n[0] == -(fx as f32) && n[0] != 0.0) || (n[2] == -(fz as f32) && n[2] != 0.0) {
+            continue;
+        }
+        b.quad_facing(
+            Mat::Stone,
+            [
+                [p[0], 0.0, p[1]],
+                [q[0], 0.0, q[1]],
+                [q[0], y0, q[1]],
+                [p[0], y0, p[1]],
+            ],
+            n,
+        );
+    }
+    let half_y = -y0 / 2.0;
+    let boxc = |r: [i64; 4]| BoxCollider {
+        center: [m(r[0] + r[2]) / 2.0, -half_y, m(r[1] + r[3]) / 2.0],
+        half: [m(r[2] - r[0]) / 2.0, half_y, m(r[3] - r[1]) / 2.0],
+    };
+    let cols = vec![boxc([x0, z0, x1, z1]), boxc(ap)];
+    let prims = b
+        .prims
+        .into_iter()
+        .filter(|p| !p.indices.is_empty())
+        .map(orient_to_normals)
+        .collect();
+    (Lod { prims }, cols)
 }
 
 /// Every face carries an explicit flat normal; wind each triangle so its

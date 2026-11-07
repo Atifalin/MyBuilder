@@ -140,6 +140,14 @@ enum HouseCmd {
         /// Comma-separated luxuries: ac,tv,washing_machine,jhoola,pooja_corner
         #[arg(long)]
         luxuries: Option<String>,
+        /// Place the house on the terrain at world x (metres; needs --z).
+        #[arg(long, requires = "z", allow_hyphen_values = true)]
+        x: Option<f64>,
+        #[arg(long, requires = "x", allow_hyphen_values = true)]
+        z: Option<f64>,
+        /// Quarter turns (0-3) when placed.
+        #[arg(long, default_value_t = 0)]
+        rot: u8,
     },
     /// List houses in the project.
     List { dir: PathBuf },
@@ -278,6 +286,7 @@ fn cmd_house_add(
     complexity: u8,
     front: &str,
     luxuries: Option<&str>,
+    placement: Option<mb_schema::Placement>,
 ) -> Result<ExitCode, String> {
     use mb_schema::*;
     let pj_path = dir.join("project.json");
@@ -351,10 +360,14 @@ fn cmd_house_add(
         front: side,
         roof: Roof::default(),
         complexity,
-        placement: None,
+        placement,
         luxuries: lux,
     });
-    let diags = validate_houses(&recipe);
+    let mut diags = validate_houses(&recipe);
+    if placement.is_some() {
+        let (_, world, _) = load_project(dir).map_err(|e| e.to_string())?;
+        diags.extend(validate_placements(&recipe, &world.extent));
+    }
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == Severity::Error)
@@ -708,6 +721,9 @@ fn main() -> ExitCode {
                 complexity,
                 front,
                 luxuries,
+                x,
+                z,
+                rot,
             } => cmd_house_add(
                 &dir,
                 id,
@@ -722,6 +738,11 @@ fn main() -> ExitCode {
                 complexity.unwrap_or(1),
                 front.as_deref().unwrap_or("s"),
                 luxuries.as_deref(),
+                x.zip(z).map(|(x, z)| mb_schema::Placement {
+                    x,
+                    z,
+                    rot_quarter: rot,
+                }),
             ),
             HouseCmd::List { dir } => cmd_house_list(&dir),
             HouseCmd::Material { cmd } => cmd_material(cmd),

@@ -1969,3 +1969,123 @@ impl mb_pipeline::Stage for HouseMaterialsStage {
         Ok(crate::outputs::FileBundle { files }.encode())
     }
 }
+
+/// Per placed house: ground under its site and the stone foundation that
+/// fills down to it (Phase 3 step 6). Sliced from the final height field:
+/// only the grid nodes covering `mb_schema::house_site_rect` are read.
+pub struct HouseSiteStage {
+    id: String,
+    deps: Vec<String>,
+    spec: mb_schema::HouseSpec,
+    /// Node window [i0, j0, i1, j1] (inclusive).
+    win: [usize; 4],
+    sea_level_m: f64,
+}
+
+impl HouseSiteStage {
+    /// None when the house is unplaced.
+    pub fn new(
+        spec: mb_schema::HouseSpec,
+        grid: Grid,
+        generator_version: u32,
+        sea_level_m: f64,
+    ) -> Option<Self> {
+        let r = mb_schema::house_site_rect(&spec)?;
+        let ix = |x: f64, up: bool| -> usize {
+            let f = (x - grid.origin_x) / grid.cell;
+            let v = if up { f.ceil() } else { f.floor() };
+            (v.max(0.0) as usize).min(grid.nx - 1)
+        };
+        let iz = |z: f64, up: bool| -> usize {
+            let f = (z - grid.origin_z) / grid.cell;
+            let v = if up { f.ceil() } else { f.floor() };
+            (v.max(0.0) as usize).min(grid.nz - 1)
+        };
+        Some(HouseSiteStage {
+            id: Self::stage_id(&spec.id),
+            deps: vec![height_dep(generator_version)],
+            win: [
+                ix(r[0], false),
+                iz(r[1], false),
+                ix(r[2], true),
+                iz(r[3], true),
+            ],
+            spec,
+            sea_level_m,
+        })
+    }
+    pub fn stage_id(id: &str) -> String {
+        format!("house.site.{id}")
+    }
+}
+
+/// Above this ground drop under one house the build warns (tall foundation).
+pub const HOUSE_STEEP_DROP_M: f64 = 6.0;
+
+impl mb_pipeline::SlicedStage for HouseSiteStage {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn deps(&self) -> &[String] {
+        &self.deps
+    }
+    fn code_version(&self) -> u32 {
+        1 + mb_house::CURRENT_HOUSE_GENERATOR_VERSION
+    }
+    fn params(&self) -> Vec<u8> {
+        params(&serde_json::json!({
+            "spec": self.spec,
+            "win": self.win,
+            "sea_level_m": self.sea_level_m,
+        }))
+    }
+    fn slice(&self, inputs: &[&Artifact]) -> Vec<u8> {
+        let (nx, _nz, _h_min, _h_max, heights, _coast) = decode_height(&inputs[0].bytes);
+        let [i0, j0, i1, j1] = self.win;
+        let mut out = Vec::new();
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                out.extend_from_slice(&heights[j * nx + i].to_le_bytes());
+            }
+        }
+        out
+    }
+    fn run(&self, slice: &[u8], _seed: u64, _ctx: &RunCtx) -> Result<Artifact, Cancelled> {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for c in slice.as_chunks::<8>().0 {
+            let h = f64::from_le_bytes(*c);
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+        // Sink the foundation 0.3 m below the lowest ground point so no
+        // gap shows where the terrain mesh interpolates between nodes.
+        let depth = hi - lo + 0.3;
+        let (lod, cols) = mb_house::foundation(&self.spec, depth);
+        let glb = mb_house::glb::lod_glb(
+            &lod,
+            &format!("{}_foundation", self.spec.id),
+            0,
+            [0.9, 0.84, 0.72],
+        );
+        let colliders: Vec<serde_json::Value> = cols
+            .iter()
+            .map(|c| serde_json::json!({"center": c.center, "half": c.half}))
+            .collect();
+        let site = serde_json::json!({
+            "y": hi,
+            "ground_min": lo,
+            "ground_max": hi,
+            "foundation_depth": depth,
+            "colliders": colliders,
+            "underwater": lo < self.sea_level_m,
+            "steep": hi - lo > HOUSE_STEEP_DROP_M,
+        });
+        Ok(FileBundle {
+            files: vec![
+                ("foundation.glb".to_string(), glb),
+                ("site.json".to_string(), serde_json::to_vec(&site).unwrap()),
+            ],
+        }
+        .encode())
+    }
+}

@@ -1532,6 +1532,73 @@ pub struct Placement {
     pub rot_quarter: u8,
 }
 
+/// Margin around a house footprint covering plinth, door steps and the
+/// foundation apron (all within 1.6 m of the walls).
+pub const HOUSE_SITE_MARGIN_M: f64 = 2.0;
+
+/// World-space XZ box `[x0, z0, x1, z1]` a placed house occupies (footprint
+/// plus `HOUSE_SITE_MARGIN_M`; odd quarter turns swap width and depth).
+/// None for unplaced houses.
+pub fn house_site_rect(h: &HouseSpec) -> Option<[f64; 4]> {
+    let p = h.placement?;
+    let (w, d) = match &h.footprint {
+        Footprint::Rect { w, d }
+        | Footprint::L { w, d, .. }
+        | Footprint::Courtyard { w, d, .. } => (*w, *d),
+    };
+    let (w, d) = if p.rot_quarter % 2 == 1 {
+        (d, w)
+    } else {
+        (w, d)
+    };
+    let (hx, hz) = (w / 2.0 + HOUSE_SITE_MARGIN_M, d / 2.0 + HOUSE_SITE_MARGIN_M);
+    Some([p.x - hx, p.z - hz, p.x + hx, p.z + hz])
+}
+
+/// Placed houses must sit inside the world and not overlap each other.
+pub fn validate_placements(recipe: &HouseRecipe, extent: &Extent) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let (hw, hd) = (extent.width_m / 2.0, extent.depth_m / 2.0);
+    let rects: Vec<Option<[f64; 4]>> = recipe.houses.iter().map(house_site_rect).collect();
+    for (i, h) in recipe.houses.iter().enumerate() {
+        let Some(r) = rects[i] else { continue };
+        let path = format!("/houses/{i}/placement");
+        let ent = |mut d: Diagnostic| {
+            d.entity_id = Some(h.id.clone());
+            d
+        };
+        if h.placement.is_some_and(|p| p.rot_quarter > 3) {
+            out.push(ent(Diagnostic::error(
+                "house.placement.rotation",
+                format!("{path}/rot_quarter"),
+                "rot_quarter must be 0..=3".to_string(),
+            )));
+        }
+        if !r.iter().all(|v| v.is_finite()) || r[0] < -hw || r[1] < -hd || r[2] > hw || r[3] > hd {
+            out.push(ent(Diagnostic::error(
+                "house.placement.outside",
+                path.clone(),
+                format!("house {:?} (with its {HOUSE_SITE_MARGIN_M} m site margin) must lie inside the world", h.id),
+            )));
+        }
+        for (j, o) in rects[..i].iter().enumerate() {
+            if let Some(o) = o
+                && r[0] < o[2]
+                && o[0] < r[2]
+                && r[1] < o[3]
+                && o[1] < r[3]
+            {
+                out.push(ent(Diagnostic::error(
+                    "house.placement.overlap",
+                    path.clone(),
+                    format!("house {:?} overlaps house {:?}", h.id, recipe.houses[j].id),
+                )));
+            }
+        }
+    }
+    out
+}
+
 /// Read houses.json when project.recipes.houses is set.
 pub fn load_houses(dir: &Path, project: &ProjectFile) -> Result<Option<HouseRecipe>, SchemaError> {
     let Some(rel) = &project.recipes.houses else {

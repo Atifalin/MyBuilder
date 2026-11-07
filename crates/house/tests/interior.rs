@@ -663,3 +663,106 @@ fn reference_pngs() {
         }
     }
 }
+
+#[test]
+fn furniture_fits_rooms_and_keeps_doors_clear() {
+    let (mut want, mut got) = (0usize, 0usize);
+    let (mut lux_want, mut lux_got) = (0usize, 0usize);
+    let mut missing: Vec<(String, i64, i64)> = Vec::new();
+    let ov = |a: [i64; 4], b: [i64; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    let mut s_all = sweep();
+    // Exercise every luxury on a slice of the sweep.
+    for s in s_all.iter_mut().step_by(4) {
+        s.luxuries = vec![
+            Luxury::Ac,
+            Luxury::Tv,
+            Luxury::WashingMachine,
+            Luxury::Jhoola,
+            Luxury::PoojaCorner,
+        ];
+    }
+    for s in &s_all {
+        let p = layout(s, house_seed(1, &s.id));
+        for f in &p.floors {
+            for fu in &f.furniture {
+                let r = f.rooms[fu.room as usize].rect;
+                assert!(
+                    fu.rect[0] >= r[0]
+                        && fu.rect[1] >= r[1]
+                        && fu.rect[2] <= r[2]
+                        && fu.rect[3] <= r[3],
+                    "{} {:?} outside its room",
+                    s.id,
+                    fu.item
+                );
+                assert!(fu.y1 > fu.y0 && fu.y1 <= (s.floor_height_m * 1000.0) as i64 - 200);
+            }
+            let floor: Vec<&Furniture> = f
+                .furniture
+                .iter()
+                .filter(|fu| fu.y0 == 0 && !matches!(fu.item, Item::JhoolaRod))
+                .collect();
+            for (i, a) in floor.iter().enumerate() {
+                for b in &floor[i + 1..] {
+                    assert!(
+                        !ov(a.rect, b.rect),
+                        "{} {:?} overlaps {:?}",
+                        s.id,
+                        a.item,
+                        b.item
+                    );
+                }
+                for d in f.doors.iter().filter(|d| d.a == a.room || d.b == a.room) {
+                    let [[ax, az], [bx, bz]] = d.seg;
+                    let zone = if az == bz {
+                        [ax.min(bx), az - 750, ax.max(bx), az + 750]
+                    } else {
+                        [ax - 750, az.min(bz), ax + 750, az.max(bz)]
+                    };
+                    assert!(!ov(zone, a.rect), "{} {:?} blocks a door", s.id, a.item);
+                }
+            }
+            for r in &f.rooms {
+                let need = match r.kind {
+                    RoomKind::Bedroom => Some(Item::Bed),
+                    RoomKind::Kitchen => Some(Item::Counter),
+                    RoomKind::Washroom => Some(Item::Wc),
+                    RoomKind::Living => Some(Item::Sofa),
+                    _ => None,
+                };
+                if let Some(it) = need {
+                    want += 1;
+                    let ok = f
+                        .furniture
+                        .iter()
+                        .any(|fu| fu.room == r.id && fu.item == it);
+                    got += ok as usize;
+                    if !ok {
+                        let w = (r.rect[2] - r.rect[0]).min(r.rect[3] - r.rect[1]);
+                        let l = (r.rect[2] - r.rect[0]).max(r.rect[3] - r.rect[1]);
+                        missing.push((format!("{:?}", r.kind), w, l));
+                    }
+                }
+            }
+            for (l, id) in &f.fixtures {
+                let it = match l {
+                    Luxury::Ac => Item::Ac,
+                    Luxury::Tv => Item::Tv,
+                    Luxury::WashingMachine => Item::WashingMachine,
+                    Luxury::Jhoola => Item::JhoolaSeat,
+                    Luxury::PoojaCorner => continue,
+                };
+                lux_want += 1;
+                lux_got += f.furniture.iter().any(|fu| fu.room == *id && fu.item == it) as usize;
+            }
+        }
+    }
+    missing.sort();
+    println!("furniture: essentials placed {got}/{want}, luxuries placed {lux_got}/{lux_want}");
+    println!("missing (kind, short side mm, long side mm): {missing:?}");
+    assert!(got * 100 >= want * 98, "essentials placed {got}/{want}");
+    assert!(
+        lux_got * 100 >= lux_want * 85,
+        "luxuries placed {lux_got}/{lux_want}"
+    );
+}

@@ -46,6 +46,42 @@ pub struct Floor {
     pub fixtures: Vec<(Luxury, u32)>,
     /// Facade openings on this storey as wall-band rects; true = door.
     pub openings: Vec<([i64; 4], bool)>,
+    /// Placed furniture and fixtures (essentials plus luxuries).
+    pub furniture: Vec<Furniture>,
+}
+
+/// Furniture and fixture placeholders (simple boxes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Item {
+    Bed,
+    Headboard,
+    Wardrobe,
+    Sofa,
+    Counter,
+    Stove,
+    Fridge,
+    Wc,
+    Basin,
+    Shower,
+    Shrine,
+    Shelves,
+    Ac,
+    Tv,
+    TvConsole,
+    WashingMachine,
+    JhoolaSeat,
+    JhoolaRod,
+}
+
+#[derive(Clone, Debug)]
+pub struct Furniture {
+    pub item: Item,
+    pub room: u32,
+    /// Footprint [x0,z0,x1,z1] mm.
+    pub rect: [i64; 4],
+    /// Bottom and top above the storey floor, mm.
+    pub y0: i64,
+    pub y1: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -1184,7 +1220,7 @@ fn layout_floor(
             _ => {}
         }
     }
-    let openings = ops
+    let openings: Vec<([i64; 4], bool)> = ops
         .iter()
         .map(|o| {
             let (b0, b1) = (o.line.min(o.band), o.line.max(o.band));
@@ -1196,13 +1232,344 @@ fn layout_floor(
             (r, o.door)
         })
         .collect();
+    let furniture = place_furniture(spec, &rooms, &doors, &fixtures, &openings);
     Floor {
         storey,
         rooms,
         doors,
         fixtures,
         openings,
+        furniture,
     }
+}
+
+/// What to place: (item, along-wall width, depth, height, elevation,
+/// gap from the wall, front clearance, keep clear of windows).
+#[derive(Clone, Copy)]
+struct Want {
+    item: Item,
+    w: i64,
+    d: i64,
+    h: i64,
+    e: i64,
+    gap: i64,
+    clear: i64,
+    tall: bool,
+}
+
+const fn want(item: Item, w: i64, d: i64, h: i64) -> Want {
+    Want {
+        item,
+        w,
+        d,
+        h,
+        e: 0,
+        gap: 0,
+        clear: 600,
+        tall: false,
+    }
+}
+
+fn r_overlap(a: R, b: R) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+/// Against-the-wall placement, first fit in a fixed order: walls longest
+/// first, then along each wall in 100 mm steps. Rejects spots inside the
+/// room's door swing zones, on top of earlier floor items (or their front
+/// clearance), and, for tall items, in front of windows.
+fn place_furniture(
+    spec: &HouseSpec,
+    rooms: &[Room],
+    doors: &[Door],
+    lux: &[(Luxury, u32)],
+    openings: &[([i64; 4], bool)],
+) -> Vec<Furniture> {
+    let mut out = Vec::new();
+    for room in rooms {
+        let has = |l: Luxury| lux.iter().any(|&(k, id)| k == l && id == room.id);
+        let [x0, z0, x1, z1] = room.rect;
+        let area_m2 = (x1 - x0) * (z1 - z0) / M2;
+        let mut wants: Vec<Want> = match room.kind {
+            RoomKind::Bedroom => vec![
+                Want {
+                    clear: 700,
+                    ..want(Item::Bed, 1500, 2000, 450)
+                },
+                Want {
+                    clear: 700,
+                    tall: true,
+                    ..want(Item::Wardrobe, 1200, 600, 2000)
+                },
+            ],
+            RoomKind::Living => vec![Want {
+                clear: 500,
+                ..want(Item::Sofa, 2000, 850, 800)
+            }],
+            RoomKind::Kitchen => vec![
+                Want {
+                    clear: 900,
+                    ..want(Item::Counter, 2400, 600, 900)
+                },
+                Want {
+                    tall: true,
+                    ..want(Item::Fridge, 700, 700, 1800)
+                },
+            ],
+            RoomKind::Washroom => {
+                let mut v = vec![
+                    want(Item::Wc, 450, 700, 750),
+                    want(Item::Basin, 550, 450, 850),
+                ];
+                if area_m2 >= 3 && (x1 - x0).min(z1 - z0) >= 1500 {
+                    v.push(Want {
+                        clear: 0,
+                        ..want(Item::Shower, 900, 900, 60)
+                    });
+                }
+                v
+            }
+            RoomKind::Pooja => vec![want(Item::Shrine, 800, 500, 1400)],
+            RoomKind::Store => vec![Want {
+                tall: true,
+                ..want(Item::Shelves, 1500, 400, 1800)
+            }],
+            RoomKind::Stair => vec![],
+        };
+        if has(Luxury::Tv) {
+            wants.push(Want {
+                clear: 1800,
+                ..want(Item::TvConsole, 1400, 400, 500)
+            });
+        }
+        if has(Luxury::Jhoola) {
+            wants.push(Want {
+                gap: 500,
+                clear: 1500,
+                ..want(Item::JhoolaSeat, 1200, 500, 60)
+            });
+        }
+        if has(Luxury::WashingMachine) {
+            wants.push(Want {
+                tall: true,
+                clear: 700,
+                ..want(Item::WashingMachine, 600, 600, 1750)
+            });
+        }
+        if has(Luxury::Ac) {
+            wants.push(Want {
+                e: 2150,
+                clear: 0,
+                tall: true,
+                ..want(Item::Ac, 900, 250, 300)
+            });
+        }
+        // Inside the partition faces.
+        let inset = [x0 + 60, z0 + 60, x1 - 60, z1 - 60];
+        let zones_at = |depth: i64| -> Vec<R> {
+            doors
+                .iter()
+                .filter(|d| d.a == room.id || d.b == room.id)
+                .map(|d| {
+                    let [[ax, az], [bx, bz]] = d.seg;
+                    if az == bz {
+                        [ax.min(bx) - 100, az - depth, ax.max(bx) + 100, az + depth]
+                    } else {
+                        [ax - depth, az.min(bz) - 100, ax + depth, az.max(bz) + 100]
+                    }
+                })
+                .collect()
+        };
+        let (zones_wide, zones_tight) = (zones_at(1000), zones_at(800));
+        // Walls: (side, length); side 0 = z0, 1 = z1, 2 = x0, 3 = x1.
+        let mut walls = [(0usize, x1 - x0), (1, x1 - x0), (2, z1 - z0), (3, z1 - z0)];
+        walls.sort_by_key(|w| (-w.1, w.0));
+        let mut taken: Vec<R> = Vec::new();
+        for wnt in &wants {
+            let mut done = None;
+            // Fallbacks for tight rooms, in order: drop the front clearance,
+            // turn beds/sofas side-on, a single bed, tighter door zones.
+            let turn = matches!(wnt.item, Item::Bed | Item::Sofa);
+            let mut passes = vec![(wnt.clear, wnt.w, wnt.d, false), (0, wnt.w, wnt.d, false)];
+            if turn {
+                passes.push((0, wnt.d, wnt.w, false));
+            }
+            if wnt.item == Item::Bed {
+                passes.push((0, 2000, 900, false));
+            }
+            passes.push((0, wnt.w, wnt.d, true));
+            if turn {
+                passes.push((0, wnt.d, wnt.w, true));
+            }
+            if wnt.item == Item::Bed {
+                passes.push((0, 2000, 900, true));
+            }
+            'pass: for &(clear, pw, pd, tight) in &passes {
+                let zones = if tight { &zones_tight } else { &zones_wide };
+                let wnt = &Want {
+                    w: pw,
+                    d: pd,
+                    clear,
+                    ..*wnt
+                };
+                for &(side, _) in &walls {
+                    let (lo, hi) = if side < 2 {
+                        (inset[0], inset[2])
+                    } else {
+                        (inset[1], inset[3])
+                    };
+                    let mut w = wnt.w;
+                    if wnt.item == Item::Counter {
+                        w = w.min(hi - lo - 200).max(1200);
+                    }
+                    let mut p = lo;
+                    while p + w <= hi {
+                        let (fp, front) = match side {
+                            0 => {
+                                let z = inset[1] + wnt.gap;
+                                (
+                                    [p, z, p + w, z + wnt.d],
+                                    [p, z + wnt.d, p + w, z + wnt.d + clear],
+                                )
+                            }
+                            1 => {
+                                let z = inset[3] - wnt.gap;
+                                (
+                                    [p, z - wnt.d, p + w, z],
+                                    [p, z - wnt.d - clear, p + w, z - wnt.d],
+                                )
+                            }
+                            2 => {
+                                let x = inset[0] + wnt.gap;
+                                (
+                                    [x, p, x + wnt.d, p + w],
+                                    [x + wnt.d, p, x + wnt.d + clear, p + w],
+                                )
+                            }
+                            _ => {
+                                let x = inset[2] - wnt.gap;
+                                (
+                                    [x - wnt.d, p, x, p + w],
+                                    [x - wnt.d - clear, p, x - wnt.d, p + w],
+                                )
+                            }
+                        };
+                        let inside = fp[0] >= inset[0]
+                            && fp[1] >= inset[1]
+                            && fp[2] <= inset[2]
+                            && fp[3] <= inset[3];
+                        let wall_mounted = wnt.e > 0;
+                        let blocked = !inside
+                            || (!wall_mounted && zones.iter().any(|z| r_overlap(*z, fp)))
+                            || (!wall_mounted
+                                && taken.iter().any(|t| {
+                                    r_overlap(*t, fp) || (clear > 0 && r_overlap(*t, front))
+                                }))
+                            || (wnt.tall && {
+                                // Window on this wall line within the span?
+                                let line =
+                                    [room.rect[1], room.rect[3], room.rect[0], room.rect[2]][side];
+                                openings.iter().any(|(o, _)| {
+                                    if side < 2 {
+                                        (o[1] == line || o[3] == line)
+                                            && o[0] < fp[2] + 100
+                                            && fp[0] - 100 < o[2]
+                                    } else {
+                                        (o[0] == line || o[2] == line)
+                                            && o[1] < fp[3] + 100
+                                            && fp[1] - 100 < o[3]
+                                    }
+                                })
+                            });
+                        if !blocked {
+                            done = Some((fp, side, *wnt));
+                            break 'pass;
+                        }
+                        p += 100;
+                    }
+                }
+            }
+            let Some((fp, side, wnt)) = done else {
+                continue;
+            };
+            let wnt = &wnt;
+            if wnt.e == 0 {
+                taken.push(fp);
+            }
+            out.push(Furniture {
+                item: wnt.item,
+                room: room.id,
+                rect: fp,
+                y0: wnt.e,
+                y1: wnt.e + wnt.h,
+            });
+            // Companions sharing the spot.
+            let strip = |depth: i64| -> R {
+                match side {
+                    0 => [fp[0], fp[1], fp[2], fp[1] + depth],
+                    1 => [fp[0], fp[3] - depth, fp[2], fp[3]],
+                    2 => [fp[0], fp[1], fp[0] + depth, fp[3]],
+                    _ => [fp[2] - depth, fp[1], fp[2], fp[3]],
+                }
+            };
+            let mut add = |item: Item, rect: R, y0: i64, y1: i64| {
+                out.push(Furniture {
+                    item,
+                    room: room.id,
+                    rect,
+                    y0,
+                    y1,
+                })
+            };
+            match wnt.item {
+                Item::Bed => add(Item::Headboard, strip(80), 450, 1000),
+                Item::Counter => {
+                    let sr = if side < 2 {
+                        [fp[0] + 100, fp[1], fp[0] + 700, fp[3]]
+                    } else {
+                        [fp[0], fp[1] + 100, fp[2], fp[1] + 700]
+                    };
+                    add(Item::Stove, sr, 900, 980);
+                }
+                Item::TvConsole => {
+                    let t = strip(60);
+                    let tv = if side < 2 {
+                        [t[0] + 100, t[1], t[2] - 100, t[3]]
+                    } else {
+                        [t[0], t[1] + 100, t[2], t[3] - 100]
+                    };
+                    add(Item::Tv, tv, 750, 1450);
+                }
+                Item::JhoolaSeat => {
+                    let (a, b) = if side < 2 {
+                        (
+                            [fp[0] + 50, fp[1] + 200, fp[0] + 90, fp[1] + 240],
+                            [fp[2] - 90, fp[1] + 200, fp[2] - 50, fp[1] + 240],
+                        )
+                    } else {
+                        (
+                            [fp[0] + 200, fp[1] + 50, fp[0] + 240, fp[1] + 90],
+                            [fp[0] + 200, fp[3] - 90, fp[0] + 240, fp[3] - 50],
+                        )
+                    };
+                    add(
+                        Item::JhoolaRod,
+                        a,
+                        510,
+                        crate::mm(spec.floor_height_m) - SLAB,
+                    );
+                    add(
+                        Item::JhoolaRod,
+                        b,
+                        510,
+                        crate::mm(spec.floor_height_m) - SLAB,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// `seg` lies on an edge of `r`.
@@ -1327,6 +1694,17 @@ pub fn floor_plan_png(spec: &HouseSpec, plan: &FloorPlan, storey: u32, px_per_m:
                 }
             }
         }
+    }
+    for fu in &f.furniture {
+        let c = f
+            .rooms
+            .get(fu.room as usize)
+            .map_or([90, 90, 90], |r| COLS[r.kind as usize]);
+        fill(
+            &mut img,
+            fu.rect,
+            [c[0] / 2 + 20, c[1] / 2 + 20, c[2] / 2 + 20],
+        );
     }
     for (r, door) in &f.openings {
         fill(
@@ -1535,6 +1913,24 @@ pub(crate) fn build_mesh(
                     cols,
                 );
             }
+        }
+        for fu in &f.furniture {
+            let mat = match fu.item {
+                Item::Counter | Item::Wc | Item::Basin | Item::Shower => Mat::Stone,
+                Item::Fridge | Item::Ac | Item::WashingMachine => Mat::Plaster,
+                Item::Tv | Item::Stove => Mat::Opening,
+                _ => Mat::Wood,
+            };
+            add_box(
+                b,
+                mat,
+                fu.rect,
+                y0 + fu.y0,
+                y0 + fu.y1,
+                true,
+                fu.y0 > 0,
+                cols,
+            );
         }
         if let Some(st) = plan.stair
             && f.storey + 1 < spec.floors
